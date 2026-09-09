@@ -24,30 +24,90 @@
         android:id="@+id/main_container"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:background="?attr/colorSurface"
+        android:background="#0E0E11"
         android:clipChildren="false">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:visibility="@{tunnels == null || tunnels.size() > 0 ? android.view.View.VISIBLE : android.view.View.GONE}">
+
+            <TextView
+                android:id="@+id/tunnel_selector"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_horizontal"
+                android:layout_marginTop="20dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:drawablePadding="6dp"
+                android:paddingStart="12dp"
+                android:paddingTop="6dp"
+                android:paddingEnd="12dp"
+                android:paddingBottom="6dp"
+                android:textColor="#D7D8DB"
+                android:textSize="16sp"
+                android:textStyle="bold"
+                tools:text="awg0 ▾" />
+
+            <org.amnezia.awg.widget.ConnectButton
+                android:id="@+id/connect_button"
+                android:layout_width="190dp"
+                android:layout_height="190dp"
+                android:layout_gravity="center_horizontal"
+                android:layout_marginTop="20dp"
+                android:layout_marginBottom="24dp" />
+
+            <TextView
+                android:id="@+id/tunnel_stats"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_horizontal"
+                android:layout_marginBottom="24dp"
+                android:gravity="center"
+                android:lineSpacingExtra="4dp"
+                android:textColor="#494B50"
+                android:textSize="13sp"
+                tools:text="awg0 · хендшейк 12 с назад" />
+
+            <TextView
+                android:id="@+id/config_button"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_horizontal"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:paddingStart="16dp"
+                android:paddingTop="10dp"
+                android:paddingEnd="16dp"
+                android:paddingBottom="10dp"
+                android:text="@string/connect_button_config"
+                android:textColor="#FBB26A"
+                android:textSize="14sp" />
 
         <androidx.recyclerview.widget.RecyclerView
             android:id="@+id/tunnel_list"
             android:layout_width="match_parent"
-            android:layout_height="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
             android:clipToPadding="false"
             android:nextFocusDown="@id/create_fab"
             android:nextFocusForward="@id/create_fab"
             android:paddingBottom="@{@dimen/design_fab_size_normal * 1.1f}"
-            android:visibility="@{tunnels.size() > 0 ? android.view.View.VISIBLE : android.view.View.GONE}"
+            android:visibility="@{tunnels.size() > 1 ? android.view.View.VISIBLE : android.view.View.GONE}"
             app:configurationHandler="@{rowConfigurationHandler}"
             app:items="@{tunnels}"
             app:layout="@{@layout/tunnel_list_item}"
             tools:itemCount="12"
             tools:listitem="@layout/tunnel_list_item" />
 
+        </LinearLayout>
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_gravity="center"
             android:orientation="vertical"
-            android:visibility="@{tunnels.size() == 0 ? android.view.View.VISIBLE : android.view.View.GONE}"
+            android:visibility="@{tunnels != null &amp;&amp; tunnels.size() == 0 ? android.view.View.VISIBLE : android.view.View.GONE}"
             tools:visibility="gone">
 
             <androidx.appcompat.widget.AppCompatImageView

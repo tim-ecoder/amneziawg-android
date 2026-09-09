@@ -270,6 +270,13 @@
     <string name="biometric_auth_error">Ошибка аутентификации</string>
     <string name="biometric_auth_error_reason">Ошибка аутентификации: %s</string>
     <string name="import_disclaimer">Убедитесь, что вы получили файл конфигурации в надёжном источнике.\n\nОфициальные сервисы Amnezia доступны только на сайте <a href="https://storage.googleapis.com/amnezia/amnezia.org">amnezia.org</a>\n</string>
+    <string name="connect_button_stats_idle">%1$s · не подключён</string>
+    <string name="connect_button_stats">%1$s · хендшейк %2$d с назад\n принято %3$s · отправлено %4$s</string>
+    <string name="connect_button_config">Конфигурация</string>
+    <string name="connect_button_pick">Выбор конфигурации</string>
+    <string name="connect_button_selector">%1$s ▾</string>
+    <string name="connect_button_disconnecting">Отключение…</string>
+    <string name="connect_button_connect">Подключиться</string>
     <string name="tunnel_status_connected">Подключено</string>
     <string name="tunnel_status_connecting">Подключение…</string>
 </resources>
