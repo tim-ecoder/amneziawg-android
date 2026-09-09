@@ -41,19 +41,18 @@ import androidx.annotation.Nullable;
 @NonNullForAll
 public final class AwgQuickBackend implements Backend {
     private static final String TAG = "AmneziaWG/AwgQuickBackend";
-    private final File localTemporaryDir;
-    private final RootShell rootShell;
+    // athena: вместо RootShell/ToolsInstaller -- делегирование init-сервису,
+    // см. ServiceControl. Конфиг пишется сразу в /data/misc/amneziawg,
+    // временный каталог в кеше приложения больше не нужен.
+    private final ServiceControl service;
     private final Map<Tunnel, Config> runningConfigs = new HashMap<>();
-    private final ToolsInstaller toolsInstaller;
     private boolean multipleTunnels;
     @Nullable private Thread statusThread;
     @Nullable private StatusCallback statusCallback;
     @Nullable private Tunnel currentTunnel;
 
-    public AwgQuickBackend(final Context context, final RootShell rootShell, final ToolsInstaller toolsInstaller) {
-        localTemporaryDir = new File(context.getCacheDir(), "tmp");
-        this.rootShell = rootShell;
-        this.toolsInstaller = toolsInstaller;
+    public AwgQuickBackend(final Context context, final ServiceControl service) {
+        this.service = service;
     }
 
     public static boolean hasKernelSupport() {
@@ -62,18 +61,14 @@ public final class AwgQuickBackend implements Backend {
 
     @Override
     public Set<String> getRunningTunnelNames() {
-        final List<String> output = new ArrayList<>();
-        // Don't throw an exception here or nothing will show up in the UI.
+        // Состояние берём из файла, который поддерживает сервис: приложению
+        // запрещён netlink_generic (app_neverallows.te:135), само спросить ядро оно не может.
         try {
-            toolsInstaller.ensureToolsAvailable();
-            if (rootShell.run(output, "awg show interfaces") != 0 || output.isEmpty())
-                return Collections.emptySet();
+            return Set.copyOf(service.runningInterfaces());
         } catch (final Exception e) {
             Log.w(TAG, "Unable to enumerate running tunnels", e);
             return Collections.emptySet();
         }
-        // awg puts all interface names on the same line. Split them into separate elements.
-        return Set.of(output.get(0).split(" "));
     }
 
     @Override
@@ -86,25 +81,20 @@ public final class AwgQuickBackend implements Backend {
         if (getState(tunnel) != State.UP) {
             return -3; // Tunnel not active
         }
-        final Collection<String> output = new ArrayList<>();
-        try {
-            if (rootShell.run(output, String.format("awg show '%s' latest-handshakes", tunnel.getName())) != 0) {
-                Log.e(TAG, "Failed to get latest handshakes");
-                return -2;
-            }
-        } catch (final Exception e) {
-            Log.e(TAG, "Failed to get latest handshakes", e);
-            return -2;
-        }
+        // Апстрим разбирал вывод `awg show <iface> latest-handshakes` -- две колонки,
+        // ключ и время. Мы отдаём строки `dump`, где второе поле это preshared key,
+        // поэтому индекс другой. Строка пира в dump -- ровно 8 полей:
+        // pubkey, psk, endpoint, allowed-ips, latest-handshake, rx, tx, keepalive.
+        final Collection<String> output = service.dumpFor(tunnel.getName());
         for (final String line : output) {
             final String[] parts = line.split("\\t");
-            if (parts.length >= 2) {
-                try {
-                    return Long.parseLong(parts[1]);
-                } catch (final NumberFormatException ignored) {
-                    Log.e(TAG, "Failed to parse handshake time");
-                    return -2;
-                }
+            if (parts.length != 8)
+                continue;
+            try {
+                return Long.parseLong(parts[4]);
+            } catch (final NumberFormatException ignored) {
+                Log.e(TAG, "Failed to parse handshake time");
+                return -2;
             }
         }
         Log.e(TAG, "No handshake time found");
@@ -184,13 +174,7 @@ public final class AwgQuickBackend implements Backend {
     @Override
     public Statistics getStatistics(final Tunnel tunnel) {
         final Statistics stats = new Statistics();
-        final Collection<String> output = new ArrayList<>();
-        try {
-            if (rootShell.run(output, String.format("awg show '%s' dump", tunnel.getName())) != 0)
-                return stats;
-        } catch (final Exception ignored) {
-            return stats;
-        }
+        final Collection<String> output = service.dumpFor(tunnel.getName());
         for (final String line : output) {
             final String[] parts = line.split("\\t");
             if (parts.length != 8)
@@ -205,10 +189,10 @@ public final class AwgQuickBackend implements Backend {
 
     @Override
     public String getVersion() throws Exception {
-        final List<String> output = new ArrayList<>();
-        if (rootShell.run(output, "cat /sys/module/amneziawg/version") != 0 || output.isEmpty())
+        final String version = service.moduleVersion();
+        if (version.isEmpty())
             throw new BackendException(Reason.UNKNOWN_KERNEL_MODULE_NAME);
-        return output.get(0);
+        return version;
     }
 
     public void setMultipleTunnels(final boolean on) {
@@ -227,7 +211,6 @@ public final class AwgQuickBackend implements Backend {
                 (state == State.DOWN && originalState == State.DOWN))
             return originalState;
         if (state == State.UP) {
-            toolsInstaller.ensureToolsAvailable();
             if (!multipleTunnels && originalState == State.DOWN) {
                 final List<Pair<Tunnel, Config>> rewind = new LinkedList<>();
                 try {
@@ -274,19 +257,18 @@ public final class AwgQuickBackend implements Backend {
 
         Objects.requireNonNull(config, "Trying to set state up with a null config");
 
-        final File tempFile = new File(localTemporaryDir, tunnel.getName() + ".conf");
-        try (final FileOutputStream stream = new FileOutputStream(tempFile, false)) {
-            stream.write(config.toAwgQuickString().getBytes(StandardCharsets.UTF_8));
+        final String name = tunnel.getName();
+        try {
+            if (state == State.UP)
+                service.writeConfig(name, config.toAwgQuickString());
+            service.setState(name, state == State.UP);
+        } catch (final Exception e) {
+            Log.e(TAG, "Service refused to bring tunnel " + name + ' ' + state, e);
+            throw new BackendException(Reason.AWG_QUICK_CONFIG_ERROR_CODE, -1);
+        } finally {
+            if (state == State.DOWN)
+                service.deleteConfig(name);
         }
-        String command = String.format("awg-quick %s '%s'",
-                state.toString().toLowerCase(Locale.ENGLISH), tempFile.getAbsolutePath());
-        if (state == State.UP)
-            command = "cat /sys/module/amneziawg/version && " + command;
-        final int result = rootShell.run(null, command);
-        // noinspection ResultOfMethodCallIgnored
-        tempFile.delete();
-        if (result != 0)
-            throw new BackendException(Reason.AWG_QUICK_CONFIG_ERROR_CODE, result);
 
         if (state == State.UP) {
             runningConfigs.put(tunnel, config);

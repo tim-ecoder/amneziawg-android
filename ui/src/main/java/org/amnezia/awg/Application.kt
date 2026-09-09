@@ -18,7 +18,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.preferencesDataStoreFile
 import com.google.android.material.color.DynamicColors
 import org.amnezia.awg.backend.Backend
-import org.amnezia.awg.backend.GoBackend
+import org.amnezia.awg.backend.ServiceControl
 import org.amnezia.awg.backend.AwgQuickBackend
 import org.amnezia.awg.configStore.FileConfigStore
 import org.amnezia.awg.model.TunnelManager
@@ -38,6 +38,7 @@ import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import java.lang.ref.WeakReference
 import java.util.Locale
 
@@ -64,25 +65,22 @@ class Application : android.app.Application() {
         }
     }
 
+    // athena: работаем только через ядро. Go-бэкенд из сборки выброшен вместе с
+    // нативной частью (libwg-go.so в APK нет), поэтому откатываться некуда --
+    // и не нужно: модуль amneziawg входит в прошивку и грузится при старте.
+    // root не требуется: AwgQuickBackend делегирует всё init-сервису,
+    // см. ServiceControl.
     private suspend fun determineBackend(): Backend {
-        var backend: Backend? = null
-        if (UserKnobs.enableKernelModule.first() && AwgQuickBackend.hasKernelSupport()) {
-            try {
-                rootShell.start()
-                val awgQuickBackend = AwgQuickBackend(applicationContext, rootShell, toolsInstaller)
-                awgQuickBackend.setMultipleTunnels(UserKnobs.multipleTunnels.first())
-                backend = awgQuickBackend
-                UserKnobs.multipleTunnels.onEach {
-                    awgQuickBackend.setMultipleTunnels(it)
-                }.launchIn(coroutineScope)
-            } catch (ignored: Exception) {
-            }
-        }
-        if (backend == null) {
-            backend = GoBackend(applicationContext)
-            GoBackend.setAlwaysOnCallback { get().applicationScope.launch { get().tunnelManager.restoreState(true) } }
-        }
-        return backend
+        if (!AwgQuickBackend.hasKernelSupport())
+            throw IllegalStateException(
+                "kernel module amneziawg is not loaded; this build has no userspace fallback")
+        // Реакция на смену сети -- в onNetworkChange(), через штатный NetworkState.
+        val awgQuickBackend = AwgQuickBackend(applicationContext, ServiceControl())
+        awgQuickBackend.setMultipleTunnels(UserKnobs.multipleTunnels.first())
+        UserKnobs.multipleTunnels.onEach {
+            awgQuickBackend.setMultipleTunnels(it)
+        }.launchIn(coroutineScope)
+        return awgQuickBackend
     }
 
     override fun onCreate() {
@@ -92,23 +90,15 @@ class Application : android.app.Application() {
         rootShell = RootShell(applicationContext)
         toolsInstaller = ToolsInstaller(applicationContext, rootShell)
         preferencesDataStore = PreferenceDataStoreFactory.create { applicationContext.preferencesDataStoreFile("settings") }
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-            runBlocking {
-                AppCompatDelegate.setDefaultNightMode(if (UserKnobs.darkTheme.first()) AppCompatDelegate.MODE_NIGHT_YES else AppCompatDelegate.MODE_NIGHT_NO)
-            }
-            UserKnobs.darkTheme.onEach {
-                val newMode = if (it) {
-                    AppCompatDelegate.MODE_NIGHT_YES
-                } else {
-                    AppCompatDelegate.MODE_NIGHT_NO
-                }
-                if (AppCompatDelegate.getDefaultNightMode() != newMode) {
-                    AppCompatDelegate.setDefaultNightMode(newMode)
-                }
-            }.launchIn(coroutineScope)
-        } else {
-            AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM)
-        }
+        // athena: тема всегда тёмная, системную не слушаем.
+        //
+        // Экран построен по образцу AmneziaVPN (фон #0E0E11, кольцо #FBB26A), а
+        // светлой темы у того нет вовсе. На светлой системной теме наш тёмный
+        // фон соседствовал со светлой панелью приложения и светлой кнопкой
+        // добавления -- видно на снимке с устройства 2026-09-09 08:51.
+        // Апстримный переключатель темы (UserKnobs.darkTheme) вместе с
+        // MODE_NIGHT_FOLLOW_SYSTEM поэтому убран.
+        AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES)
         tunnelManager = TunnelManager(FileConfigStore(applicationContext))
         tunnelManager.onCreate()
 
@@ -165,17 +155,30 @@ class Application : android.app.Application() {
 
                 Log.i(TAG, "Reconnecting ${activeTunnels.size} tunnel(s) after network change: $oldType -> $newType")
 
+                // athena: апстрим здесь гасил туннель и поднимал заново
+                // (setStateAsync(DOWN), delay(500), setStateAsync(UP)).
+                // Для ядерного туннеля это вредно и ненадёжно: замерено на
+                // 5000014556 -- DOWN прошёл, UP до сервиса не дошёл вовсе, и
+                // туннеля не было 85 секунд, пока его не подняли руками.
+                //
+                // Ядру достаточно пересоздать UDP-сокет: он привязан к сети, в
+                // которой создан, и только это ему и нужно. Маршруты, правила
+                // netd и конфигурация остаются на месте, соединения поверх
+                // туннеля не рвутся. Проверено в поле: на переходе
+                // wifi -> мобильная сеть 207 мс от пропажи wifi до пересоздания.
+                val service = ServiceControl()
                 for (tunnel in activeTunnels) {
                     try {
-                        Log.d(TAG, "Disconnecting tunnel: ${tunnel.name}")
-                        // Toggle tunnel off and on to reconnect
-                        tunnel.setStateAsync(org.amnezia.awg.backend.Tunnel.State.DOWN)
-                        kotlinx.coroutines.delay(500) // Small delay for cleanup
-                        Log.d(TAG, "Reconnecting tunnel: ${tunnel.name}")
-                        tunnel.setStateAsync(org.amnezia.awg.backend.Tunnel.State.UP)
-                        Log.i(TAG, "Successfully reconnected tunnel: ${tunnel.name}")
+                        // athena: ничего не делаем. Пересоздание сокета и сброс
+                        // состояния пиров выполняет служба amneziawg_status: она
+                        // следит за интерфейсом, через который реально уходят
+                        // пакеты туннеля, и потому ловит переход wifi -> LTE,
+                        // который сюда вообще не приходит (NetworkState считает
+                        // сеть после потери "начальной" и пропускает вызов).
+                        // Дубль же давал два пересоздания подряд на возврате к wifi.
+                        Log.i(TAG, "Network changed, tunnel ${tunnel.name} is handled by the service")
                     } catch (e: Exception) {
-                        Log.e(TAG, "Failed to reconnect tunnel ${tunnel.name}", e)
+                        Log.e(TAG, "Failed to rebind ${tunnel.name}", e)
                     }
                 }
             } catch (e: Exception) {

@@ -15,36 +15,17 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     namespace = "${pkg}.tunnel"
-    externalNativeBuild {
-        cmake {
-            path("tools/CMakeLists.txt")
-        }
-    }
+    // athena: нативная сборка выключена -- awg/awg-quick приезжают из ROM,
+    //         go-бэкенд не нужен: туннель поднимает ядро.
     testOptions.unitTests.all {
         it.testLogging { events(TestLogEvent.PASSED, TestLogEvent.SKIPPED, TestLogEvent.FAILED) }
     }
     buildTypes {
         all {
-            externalNativeBuild {
-                cmake {
-                    targets("libwg-go.so", "libwg.so", "libwg-quick.so")
-                    arguments("-DGRADLE_USER_HOME=${project.gradle.gradleUserHomeDir}")
-                }
-            }
         }
         release {
-            externalNativeBuild {
-                cmake {
-                    arguments("-DANDROID_PACKAGE_NAME=${cmakeAndroidPackageName}")
-                }
-            }
         }
         debug {
-            externalNativeBuild {
-                cmake {
-                    arguments("-DANDROID_PACKAGE_NAME=${cmakeAndroidPackageName}.debug")
-                }
-            }
         }
     }
     lint {

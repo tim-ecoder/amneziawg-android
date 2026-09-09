@@ -5,14 +5,10 @@
 
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <application>
-        <service
-            android:name="org.amnezia.awg.backend.GoBackend$VpnService"
-            android:permission="android.permission.BIND_VPN_SERVICE"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="android.net.VpnService" />
-            </intent-filter>
-        </service>
-    </application>
+    <!-- athena: объявление GoBackend$VpnService убрано.
+         Туннель у нас ядерный (netdev awg0), VpnService никто не поднимает,
+         а объявленный сервис заставлял систему предлагать постоянный VPN и
+         затем показывать "отключено от постоянного VPN". Значка VPN всё равно
+         не было: он появляется только у настоящего VpnService. -->
+    <application />
 </manifest>
