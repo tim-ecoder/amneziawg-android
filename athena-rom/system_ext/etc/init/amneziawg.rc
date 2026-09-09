@@ -40,22 +40,11 @@ service amneziawg_down /system_ext/bin/awg-tunnel.sh down ${sys.amneziawg.iface}
     disabled
     seclabel u:r:amneziawg:s0
 
-# Пересоздаёт UDP-сокет туннеля при смене транспорта (wifi <-> мобильная сеть).
-# Ядерный сокет привязан к сети, в которой создан, и сам не переезжает --
-# см. подробный разбор в awg-tunnel.sh. Дёргается приложением по событию
-# ConnectivityManager.NetworkCallback.
-service amneziawg_refresh /system_ext/bin/awg-tunnel.sh refresh ${sys.amneziawg.iface}
-    class late_start
-    user root
-    group root net_admin net_raw inet
-    capabilities NET_ADMIN NET_RAW DAC_OVERRIDE DAC_READ_SEARCH
-    oneshot
-    disabled
-    seclabel u:r:amneziawg:s0
-
-# Пишет `awg show all dump` в /data/misc/amneziawg/status, пока туннель поднят --
-# приложению взять статистику больше неоткуда, netlink_generic ему запрещён.
-# Запускается из amneziawg_up, останавливается, когда поднятых туннелей не осталось.
+# Пишет `awg show all dump` в /data/misc/amneziawg/status, пока поднят хоть один
+# туннель -- приложению взять статистику больше неоткуда, netlink_generic ему
+# запрещён. Заодно следит за сменой сети у ВСЕХ поднятых интерфейсов и
+# пересоздаёт их UDP-сокеты (разбор в awg-tunnel.sh). Запускается из
+# amneziawg_up, останавливается, когда поднятых туннелей не осталось.
 service amneziawg_status /system_ext/bin/awg-tunnel.sh status
     class late_start
     user root
@@ -64,9 +53,27 @@ service amneziawg_status /system_ext/bin/awg-tunnel.sh status
     disabled
     seclabel u:r:amneziawg:s0
 
+# Отключение фильтрации входящих пакетов на адрес VPN (разбор в awg-tunnel.sh,
+# ветка devconfig). Без этого система отбрасывает расшифрованные пакеты, потому
+# что они приходят с awg0, а не с tunN, который создал VpnService приложения.
+#
+# user root, а не system, по той же причине, что и у athena_devconfig:
+# `cmd device_config` строит AttributionSource по uid вызывающего, и для 1000
+# имя пакета выходит null -- запись молча отклоняется, без отказа SELinux.
+service amneziawg_devconfig /system_ext/bin/awg-tunnel.sh devconfig
+    class late_start
+    user root
+    group root
+    oneshot
+    disabled
+    seclabel u:r:amneziawg:s0
+
 # Автоподъём при загрузке -- только если явно разрешён. Имя туннеля берётся из
 # persist.sys.amneziawg.iface (по умолчанию awg0); скрипт сам молча выйдет,
 # если конфига нет.
+on property:sys.boot_completed=1
+    start amneziawg_devconfig
+
 on property:sys.boot_completed=1 && property:persist.sys.amneziawg.autostart=1
     setprop sys.amneziawg.iface ${persist.sys.amneziawg.iface:-awg0}
     start amneziawg_up

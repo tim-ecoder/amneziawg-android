@@ -5,10 +5,20 @@
 
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- athena: объявление GoBackend$VpnService убрано.
-         Туннель у нас ядерный (netdev awg0), VpnService никто не поднимает,
-         а объявленный сервис заставлял систему предлагать постоянный VPN и
-         затем показывать "отключено от постоянного VPN". Значка VPN всё равно
-         не было: он появляется только у настоящего VpnService. -->
-    <application />
+    <!-- athena: VpnService-оболочка над ядерным туннелем (KernelVpnService).
+         Данные через tun не ходят, сервис нужен ради VPN-сети в системе:
+         без неё приложения с явным выбором сети (звонки Telegram) не работали. -->
+    <application>
+        <service
+            android:name="org.amnezia.awg.backend.KernelVpnService"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.net.VpnService.SUPPORTS_ALWAYS_ON"
+                android:value="true" />
+        </service>
+    </application>
 </manifest>

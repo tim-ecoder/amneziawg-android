@@ -55,6 +55,22 @@ public final class ServiceControl {
     /** Сколько ждём завершения предыдущего запуска той же службы. */
     private static final long SERVICE_IDLE_WAIT_MS = 20_000;
 
+    /**
+     * Ненулевой код из sys.amneziawg.result. Коды awg-tunnel.sh:
+     * 1 -- awg-quick не справился, 2 -- нет конфига, 3 -- модуль ядра не
+     * загружен, 4 -- недопустимое имя интерфейса.
+     */
+    public static final class ServiceException extends IOException {
+        public static final int RC_NO_CONFIG = 2;
+        public static final int RC_NO_MODULE = 3;
+        public final int rc;
+
+        ServiceException(final String service, final int rc) {
+            super("service " + service + " returned " + rc);
+            this.rc = rc;
+        }
+    }
+
     private static void setProp(final String key, final String value) throws IOException {
         try {
             final Class<?> sp = Class.forName("android.os.SystemProperties");
@@ -96,7 +112,10 @@ public final class ServiceControl {
      * Сервис публикует код возврата в sys.amneziawg.result как "<iface>:<rc>".
      */
     public void setState(final String name, final boolean up) throws IOException {
-        final String service = up ? "amneziawg_up" : "amneziawg_down";
+        run(up ? "amneziawg_up" : "amneziawg_down", name, TIMEOUT_MS);
+    }
+
+    private void run(final String service, final String name, final long timeoutMs) throws IOException {
         // Ждём, пока отработает предыдущий запуск этой же службы.
         //
         // init игнорирует ctl.start для сервиса, который уже выполняется, и
@@ -109,16 +128,22 @@ public final class ServiceControl {
         setProp(PROP_IFACE, name);
         setProp(CTL_START, service);
 
-        final long deadline = System.currentTimeMillis() + TIMEOUT_MS;
+        final long deadline = System.currentTimeMillis() + timeoutMs;
         while (System.currentTimeMillis() < deadline) {
             final String r = getProp(PROP_RESULT);
             if (r.startsWith(name + ":")) {
                 final String code = r.substring(name.length() + 1);
                 if ("0".equals(code)) {
-                    Log.i(TAG, "Tunnel " + name + (up ? " up" : " down") + " via service");
+                    Log.i(TAG, service + " for " + name + " done");
                     return;
                 }
-                throw new IOException("service " + service + " returned " + code);
+                int rc;
+                try {
+                    rc = Integer.parseInt(code);
+                } catch (final NumberFormatException ignored) {
+                    rc = -1;
+                }
+                throw new ServiceException(service, rc);
             }
             try {
                 Thread.sleep(POLL_MS);
@@ -144,39 +169,6 @@ public final class ServiceControl {
             }
         }
         Log.w(TAG, service + " is still running; starting it anyway");
-    }
-
-    /**
-     * Пересоздать UDP-сокет туннеля -- лекарство от смены транспорта.
-     *
-     * Ядерный сокет привязан к сетевому контексту, в котором создан, и при
-     * переходе wifi <-> мобильная сеть остаётся привязан к умершему. Измерено:
-     * 120 с молчания, сброс эндпоинта не помогает, явная привязка к новой сети
-     * меткой тоже. Помогает только пересоздание сокета -- туннель оживает за
-     * секунду. Userspace-реализация делает ровно это сама в BindUpdate().
-     *
-     * Дешёвая операция: соединения поверх туннеля не рвутся, маршруты и
-     * конфигурация netd не трогаются.
-     */
-    public void refresh(final String name) {
-        try {
-            setProp(PROP_RESULT, "");
-            setProp(PROP_IFACE, name);
-            setProp(CTL_START, "amneziawg_refresh");
-            final long deadline = System.currentTimeMillis() + 10_000;
-            while (System.currentTimeMillis() < deadline) {
-                if (getProp(PROP_RESULT).startsWith(name + ":")) {
-                    Log.i(TAG, "Socket rebound for " + name + " after network change");
-                    return;
-                }
-                Thread.sleep(POLL_MS);
-            }
-            Log.w(TAG, "refresh timed out for " + name);
-        } catch (final InterruptedException e) {
-            Thread.currentThread().interrupt();
-        } catch (final Exception e) {
-            Log.w(TAG, "refresh failed: " + e.getMessage());
-        }
     }
 
     /** Содержимое `awg show all dump`, которое сервис обновляет, пока туннель поднят. */

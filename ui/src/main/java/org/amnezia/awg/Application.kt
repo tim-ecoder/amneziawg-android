@@ -18,8 +18,8 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.preferencesDataStoreFile
 import com.google.android.material.color.DynamicColors
 import org.amnezia.awg.backend.Backend
-import org.amnezia.awg.backend.ServiceControl
 import org.amnezia.awg.backend.AwgQuickBackend
+import org.amnezia.awg.backend.ServiceControl
 import org.amnezia.awg.configStore.FileConfigStore
 import org.amnezia.awg.model.TunnelManager
 import org.amnezia.awg.util.NetworkState
@@ -71,9 +71,12 @@ class Application : android.app.Application() {
     // root не требуется: AwgQuickBackend делегирует всё init-сервису,
     // см. ServiceControl.
     private suspend fun determineBackend(): Backend {
+        // Без модуля не падаем: аддон ставится на любую прошивку athena, и на
+        // сборке без amneziawg.ko приложение должно открыться и при попытке
+        // подключения показать «модуль не загружен», а не умереть на старте.
+        // Службу об этом спросит сам бэкенд (код 3 в sys.amneziawg.result).
         if (!AwgQuickBackend.hasKernelSupport())
-            throw IllegalStateException(
-                "kernel module amneziawg is not loaded; this build has no userspace fallback")
+            Log.w(TAG, "kernel module amneziawg is not loaded; tunnels cannot be brought up on this ROM")
         // Реакция на смену сети -- в onNetworkChange(), через штатный NetworkState.
         val awgQuickBackend = AwgQuickBackend(applicationContext, ServiceControl())
         awgQuickBackend.setMultipleTunnels(UserKnobs.multipleTunnels.first())
@@ -166,7 +169,6 @@ class Application : android.app.Application() {
                 // netd и конфигурация остаются на месте, соединения поверх
                 // туннеля не рвутся. Проверено в поле: на переходе
                 // wifi -> мобильная сеть 207 мс от пропажи wifi до пересоздания.
-                val service = ServiceControl()
                 for (tunnel in activeTunnels) {
                     try {
                         // athena: ничего не делаем. Пересоздание сокета и сброс

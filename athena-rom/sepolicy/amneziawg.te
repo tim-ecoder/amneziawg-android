@@ -100,9 +100,19 @@ allow amneziawg usermodehelper:file r_file_perms;
 binder_call(system_server, amneziawg)
 allow system_server amneziawg:fd use;
 
+# `cmd device_config put tethering ingress_to_vpn_address_filtering -1`
+# (ветка devconfig в скрипте): без этого система отбрасывает расшифрованные
+# пакеты, пришедшие с awg0 вместо tunN. Идёт binder-вызовом в system_server,
+# который уже разрешён выше.
+allow amneziawg device_config_service:service_manager find;
+
 # Типы проперти для протокола с приложением (см. property_contexts и amneziawg_app.te).
 type amneziawg_prop, property_type;
 type ctl_amneziawg_prop, property_type;
+# init.svc.amneziawg_* -- состояние наших сервисов, ставит их init; всем
+# остальным только чтение.
+type amneziawg_svc_prop, property_type;
+get_prop(amneziawg, amneziawg_svc_prop)
 
 # Сервис отвечает приложению кодом возврата и читает имя интерфейса.
 set_prop(amneziawg, amneziawg_prop)

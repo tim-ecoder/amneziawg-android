@@ -6,6 +6,7 @@
 package org.amnezia.awg.backend;
 
 import android.content.Context;
+import android.content.Intent;
 import android.util.Log;
 import android.util.Pair;
 
@@ -30,6 +31,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 import androidx.annotation.Nullable;
 
@@ -45,6 +47,7 @@ public final class AwgQuickBackend implements Backend {
     // см. ServiceControl. Конфиг пишется сразу в /data/misc/amneziawg,
     // временный каталог в кеше приложения больше не нужен.
     private final ServiceControl service;
+    private final Context context;
     private final Map<Tunnel, Config> runningConfigs = new HashMap<>();
     private boolean multipleTunnels;
     @Nullable private Thread statusThread;
@@ -52,7 +55,47 @@ public final class AwgQuickBackend implements Backend {
     @Nullable private Tunnel currentTunnel;
 
     public AwgQuickBackend(final Context context, final ServiceControl service) {
+        this.context = context;
         this.service = service;
+        // Система отобрала VPN (другой клиент или выключение в настройках):
+        // оболочки больше нет, правила по uid сняты, приложения из списка пошли бы
+        // напрямую. Опускаем и ядерный туннель, чтобы состояние было честным.
+        KernelVpnService.setRevokeHandler(() -> new Thread(() -> {
+            for (final Tunnel tunnel : new ArrayList<>(runningConfigs.keySet())) {
+                try {
+                    setState(tunnel, State.DOWN, null);
+                    tunnel.onStateChange(State.DOWN);
+                } catch (final Exception e) {
+                    Log.e(TAG, "Failed to bring " + tunnel.getName() + " down after VPN revoke", e);
+                }
+            }
+        }, "awg-revoke").start());
+    }
+
+    /** Запускает KernelVpnService (если ещё не жив) и отдаёт его экземпляр. */
+    private KernelVpnService vpnService() throws BackendException {
+        if (!KernelVpnService.instance().isDone()) {
+            Log.d(TAG, "Requesting to start KernelVpnService");
+            context.startService(new Intent(context, KernelVpnService.class));
+        }
+        try {
+            return KernelVpnService.instance().get(2, TimeUnit.SECONDS);
+        } catch (final Exception e) {
+            final BackendException be = new BackendException(Reason.UNABLE_TO_START_VPN);
+            be.initCause(e);
+            throw be;
+        }
+    }
+
+    private void stopVpn() {
+        if (KernelVpnService.instance().isDone()) {
+            try {
+                final KernelVpnService svc = KernelVpnService.instance().get(0, TimeUnit.NANOSECONDS);
+                svc.closeTun();
+                svc.stopSelf();
+            } catch (final Exception ignored) {
+            }
+        }
     }
 
     public static boolean hasKernelSupport() {
@@ -258,17 +301,51 @@ public final class AwgQuickBackend implements Backend {
         Objects.requireNonNull(config, "Trying to set state up with a null config");
 
         final String name = tunnel.getName();
+        if (state == State.UP && android.net.VpnService.prepare(context) != null)
+            throw new BackendException(Reason.VPN_NOT_AUTHORIZED);
         try {
-            if (state == State.UP)
+            if (state == State.UP) {
+                // Сначала оболочка VpnService: система создаёт tunN с адресом
+                // туннеля, VPN-сеть и правила по uid. Потом служба поднимает awg0
+                // и переводит маршруты таблицы tunN на него (attach_vpn в
+                // awg-tunnel.sh). Не вышло у службы -- оболочку снимаем, чтобы не
+                // оставлять приложения в VPN-сети без единого работающего маршрута.
                 service.writeConfig(name, config.toAwgQuickString());
-            service.setState(name, state == State.UP);
+                vpnService().establish(name, config);
+                try {
+                    service.setState(name, true);
+                } catch (final Exception e) {
+                    stopVpn();
+                    throw e;
+                }
+            } else {
+                // Сначала оболочка: с ней уходят tunN, его таблица и правила по uid.
+                stopVpn();
+                service.setState(name, false);
+            }
+        } catch (final BackendException e) {
+            throw e;
+        } catch (final ServiceControl.ServiceException e) {
+            Log.e(TAG, "Service refused to bring tunnel " + name + ' ' + state, e);
+            // Причину показываем ту, что назвала служба: без модуля ядра это
+            // «модуль не загружен», а не безликая ошибка конфига.
+            switch (e.rc) {
+                case ServiceControl.ServiceException.RC_NO_MODULE:
+                    throw new BackendException(Reason.UNKNOWN_KERNEL_MODULE_NAME);
+                case ServiceControl.ServiceException.RC_NO_CONFIG:
+                    throw new BackendException(Reason.TUNNEL_MISSING_CONFIG);
+                default:
+                    throw new BackendException(Reason.AWG_QUICK_CONFIG_ERROR_CODE, e.rc);
+            }
         } catch (final Exception e) {
             Log.e(TAG, "Service refused to bring tunnel " + name + ' ' + state, e);
             throw new BackendException(Reason.AWG_QUICK_CONFIG_ERROR_CODE, -1);
-        } finally {
-            if (state == State.DOWN)
-                service.deleteConfig(name);
         }
+        // Конфиг убираем только после УСПЕШНОГО down: если служба не смогла
+        // снять интерфейс, туннель ещё жив, и его конфиг нужен provoke() для
+        // сброса пиров через setconf.
+        if (state == State.DOWN)
+            service.deleteConfig(name);
 
         if (state == State.UP) {
             runningConfigs.put(tunnel, config);

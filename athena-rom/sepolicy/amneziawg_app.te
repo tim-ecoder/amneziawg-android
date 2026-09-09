@@ -36,6 +36,8 @@ allow amneziawg_app amneziawg_data_file:file { create open read write getattr un
 set_prop(amneziawg_app, amneziawg_prop)
 # Запуск ровно трёх наших сервисов -- ctl.amneziawg_{up,down,status}.
 set_prop(amneziawg_app, ctl_amneziawg_prop)
+# Дождаться, пока прошлый запуск той же службы завершится: init.svc.* только читать.
+get_prop(amneziawg_app, amneziawg_svc_prop)
 
 # Версия модуля: /sys/module/amneziawg/version читается напрямую,
 # делегировать такое чтение не нужно.
