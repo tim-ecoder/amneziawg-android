@@ -1,0 +1,72 @@
+# Ядерный туннель AmneziaWG.
+#
+# На system_ext, а не на vendor, по той же причине, что и athena_devconfig:
+# awg-quick настраивает DNS binder-вызовом в netd и управляет сетью через ndc,
+# а вендорным доменам ходить в netd запрещено neverallow'ами.
+#
+# Управляет этим приложение org.amnezia.awg: оно кладёт конфиг в
+# /data/misc/amneziawg/<имя>.conf, пишет имя в sys.amneziawg.iface и дёргает
+# ctl.start. Ответ забирает из sys.amneziawg.result. Root ему для этого не нужен.
+
+# Каталог конфигов и файла состояния.
+# 0770 root:inet, а не root:root: приложению нужно класть сюда свои конфиги, а
+# SELinux этого мало -- обычные права проверяются отдельно. Группа inet выбрана
+# потому, что её и так получает любое приложение с INTERNET, то есть новых
+# привилегий это не создаёт. Настоящее ограничение здесь — метка
+# amneziawg_data_file: доступ к ней есть только у доменов amneziawg и
+# amneziawg_app, см. sepolicy/system_ext/private/.
+on post-fs-data
+    mkdir /data/misc/amneziawg 0770 root inet
+    # Файл состояния переживает перезагрузку, а туннель -- нет. Устаревший
+    # status заставлял приложение считать туннель поднятым, и restoreState
+    # после ребута ничего не делал (setState видит state == originalState).
+    rm /data/misc/amneziawg/status
+
+service amneziawg_up /system_ext/bin/awg-tunnel.sh up ${sys.amneziawg.iface}
+    class late_start
+    user root
+    group root net_admin net_raw inet
+    capabilities NET_ADMIN NET_RAW DAC_OVERRIDE DAC_READ_SEARCH
+    oneshot
+    disabled
+    seclabel u:r:amneziawg:s0
+
+service amneziawg_down /system_ext/bin/awg-tunnel.sh down ${sys.amneziawg.iface}
+    class late_start
+    user root
+    group root net_admin net_raw inet
+    capabilities NET_ADMIN NET_RAW DAC_OVERRIDE DAC_READ_SEARCH
+    oneshot
+    disabled
+    seclabel u:r:amneziawg:s0
+
+# Пересоздаёт UDP-сокет туннеля при смене транспорта (wifi <-> мобильная сеть).
+# Ядерный сокет привязан к сети, в которой создан, и сам не переезжает --
+# см. подробный разбор в awg-tunnel.sh. Дёргается приложением по событию
+# ConnectivityManager.NetworkCallback.
+service amneziawg_refresh /system_ext/bin/awg-tunnel.sh refresh ${sys.amneziawg.iface}
+    class late_start
+    user root
+    group root net_admin net_raw inet
+    capabilities NET_ADMIN NET_RAW DAC_OVERRIDE DAC_READ_SEARCH
+    oneshot
+    disabled
+    seclabel u:r:amneziawg:s0
+
+# Пишет `awg show all dump` в /data/misc/amneziawg/status, пока туннель поднят --
+# приложению взять статистику больше неоткуда, netlink_generic ему запрещён.
+# Запускается из amneziawg_up, останавливается, когда поднятых туннелей не осталось.
+service amneziawg_status /system_ext/bin/awg-tunnel.sh status
+    class late_start
+    user root
+    group root net_admin inet
+    capabilities NET_ADMIN DAC_OVERRIDE DAC_READ_SEARCH
+    disabled
+    seclabel u:r:amneziawg:s0
+
+# Автоподъём при загрузке -- только если явно разрешён. Имя туннеля берётся из
+# persist.sys.amneziawg.iface (по умолчанию awg0); скрипт сам молча выйдет,
+# если конфига нет.
+on property:sys.boot_completed=1 && property:persist.sys.amneziawg.autostart=1
+    setprop sys.amneziawg.iface ${persist.sys.amneziawg.iface:-awg0}
+    start amneziawg_up

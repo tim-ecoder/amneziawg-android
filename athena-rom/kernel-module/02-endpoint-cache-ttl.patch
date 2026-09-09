@@ -1,0 +1,49 @@
+--- a/src/socket.c
++++ b/src/socket.c
+@@ -165,11 +165,35 @@
+ #endif
+ }
+ 
++#define WG_ENDPOINT_CACHE_TTL (5 * HZ)
++
+ int wg_socket_send_skb_to_peer(struct wg_peer *peer, struct sk_buff *skb, u8 ds)
+ {
+ 	size_t skb_len = skb->len;
+ 	int ret = -EAFNOSUPPORT;
+ 
++	/* athena/Android: срок жизни кэша маршрута до пира.
++	 *
++	 * Android переключает основную сеть (wifi <-> мобильная) правилами
++	 * ip rule, а не событиями на интерфейсах. Закэшированный dst при этом
++	 * остаётся формально валидным: ipv4_dst_check() смотрит только на genid,
++	 * который от смены правил не меняется. В итоге пакеты к пиру продолжают
++	 * уходить в умершую сеть, пока кэш не сбросит кто-то снаружи
++	 * (например, смена listen-port через netlink). Здесь раз в
++	 * WG_ENDPOINT_CACHE_TTL делается то же, что wireguard-go делает в
++	 * BindUpdate() на каждое изменение маршрутов: сбрасывается кэш и
++	 * забывается запомненный адрес источника, чтобы следующий пакет прошёл
++	 * полный выбор маршрута по текущим правилам системы. Одна FIB-проверка
++	 * в несколько секунд на пира ничего не стоит, зато туннель следует за
++	 * маршрутизацией сам, без помощи из userspace. Гонка двух CPU на stamp
++	 * безобидна: будет два сброса подряд.
++	 */
++	if (time_is_before_jiffies(READ_ONCE(peer->endpoint_cache_stamp) +
++				   WG_ENDPOINT_CACHE_TTL)) {
++		WRITE_ONCE(peer->endpoint_cache_stamp, jiffies);
++		wg_socket_clear_peer_endpoint_src(peer);
++	}
++
+ 	read_lock_bh(&peer->endpoint_lock);
+ 	if (peer->endpoint.addr.sa_family == AF_INET)
+ 		ret = send4(peer->device, skb, &peer->endpoint, ds,
+--- a/src/peer.h
++++ b/src/peer.h
+@@ -47,6 +47,8 @@
+ 	struct noise_keypairs keypairs;
+ 	struct endpoint endpoint;
+ 	struct dst_cache endpoint_cache;
++	/* athena: jiffies последнего принудительного сброса endpoint_cache, см. socket.c */
++	unsigned long endpoint_cache_stamp;
+ 	rwlock_t endpoint_lock;
+ 	struct noise_handshake handshake;
+ 	atomic64_t last_sent_handshake;

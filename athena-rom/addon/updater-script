@@ -1,0 +1,16 @@
+assert(getprop("ro.product.device") == "athena" || getprop("ro.build.product") == "athena" || abort("Пакет для athena, а это " + getprop("ro.product.device") + "."););
+ui_print("AmneziaWG addon: тулзы, служба, init.rc и приложение");
+ui_print("Модуль ядра и sepolicy сюда не входят -- они только из сборки ROM");
+show_progress(0.500000, 0);
+mount("ext4", "EMMC", "/dev/block/by-name/system", "/mnt/system");
+package_extract_dir("system", "/mnt/system/system");
+set_metadata("/mnt/system/system/bin/awg", "uid", 0, "gid", 2000, "mode", 0755, "capabilities", 0x0, "selabel", "u:object_r:system_file:s0");
+set_metadata("/mnt/system/system/bin/awg-quick", "uid", 0, "gid", 2000, "mode", 0755, "capabilities", 0x0, "selabel", "u:object_r:system_file:s0");
+set_metadata("/mnt/system/system/system_ext/bin/awg-tunnel.sh", "uid", 0, "gid", 2000, "mode", 0755, "capabilities", 0x0, "selabel", "u:object_r:amneziawg_exec:s0");
+set_metadata("/mnt/system/system/system_ext/etc/init/amneziawg.rc", "uid", 0, "gid", 0, "mode", 0644, "capabilities", 0x0, "selabel", "u:object_r:system_file:s0");
+set_metadata_recursive("/mnt/system/system/system_ext/app/AmneziaWG", "uid", 0, "gid", 0, "dmode", 0755, "fmode", 0644, "capabilities", 0x0, "selabel", "u:object_r:system_file:s0");
+set_metadata("/mnt/system/system/addon.d/71-amneziawg.sh", "uid", 0, "gid", 0, "mode", 0755, "capabilities", 0x0, "selabel", "u:object_r:system_file:s0");
+show_progress(0.400000, 0);
+unmount("/mnt/system");
+ui_print("Готово. Нужен ROM с модулем amneziawg.ko и доменами sepolicy.");
+set_progress(1.000000);

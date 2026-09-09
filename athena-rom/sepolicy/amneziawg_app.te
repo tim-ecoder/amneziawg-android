@@ -1,0 +1,50 @@
+# Домен приложения org.amnezia.awg (наша сборка, подписана платформенным ключом).
+#
+# Зачем отдельный домен: приложению нужно ставить sys.amneziawg.* и дёргать
+# ctl.start для наших сервисов. Давать это untrusted_app или priv_app целиком
+# было бы слишком широко -- права получили бы все приложения этого класса.
+# Платформенная подпись даёт seinfo=platform, по нему seapp_contexts и заводит
+# отдельный домен.
+#
+# Обратите внимание, чего здесь НЕТ и быть не может: ни net_admin, ни netd, ни
+# netlink_generic. Приложение не выполняет привилегированных операций вообще --
+# только просит сервис и читает файл состояния. Это не осторожность, а
+# требование политики:
+#   netd.te:205             neverallow { appdomain -network_stack } netd:binder call
+#   app_neverallows.te:135  neverallow all_untrusted_apps *:{ ... netlink_generic_socket ... }
+
+type amneziawg_app, domain;
+app_domain(amneziawg_app)
+
+# Обычное приложение с интерфейсом: свои данные, сеть для скачивания конфигов,
+# доступ к системным сервисам через binder.
+allow amneziawg_app app_data_file:dir create_dir_perms;
+allow amneziawg_app app_data_file:{ file lnk_file } create_file_perms;
+allow amneziawg_app self:{ tcp_socket udp_socket } create_socket_perms;
+net_domain(amneziawg_app)
+binder_use(amneziawg_app)
+binder_call(amneziawg_app, system_server)
+allow amneziawg_app system_server_service:service_manager find;
+allow amneziawg_app activity_service:service_manager find;
+
+# Конфиги туннелей: приложение кладёт <имя>.conf, читает status.
+# Тип наш собственный, ничьих neverallow не задевает.
+allow amneziawg_app amneziawg_data_file:dir { search write add_name remove_name };
+allow amneziawg_app amneziawg_data_file:file { create open read write getattr unlink };
+
+# Протокол с сервисом: имя интерфейса туда, код возврата обратно.
+set_prop(amneziawg_app, amneziawg_prop)
+# Запуск ровно трёх наших сервисов -- ctl.amneziawg_{up,down,status}.
+set_prop(amneziawg_app, ctl_amneziawg_prop)
+
+# Версия модуля: /sys/module/amneziawg/version читается напрямую,
+# делегировать такое чтение не нужно.
+allow amneziawg_app sysfs:dir search;
+allow amneziawg_app sysfs:file r_file_perms;
+
+# --- по AVC-логам с 5000194344 ---
+# Обычное чтение системных проперти -- это делает любое приложение через
+# android.os.SystemProperties при старте.
+get_prop(amneziawg_app, default_prop)
+# UI рисуется через GPU-сервис.
+allow amneziawg_app gpu_service:service_manager find;

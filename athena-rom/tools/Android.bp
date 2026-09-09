@@ -1,0 +1,42 @@
+// AmneziaWG userspace tools (awg / awg-quick), built for the kernel module.
+//
+// Source: https://github.com/amnezia-vpn/amneziawg-tools v3.1.20260812
+// Upstream builds these for Android as libwg.so / libwg-quick.so inside the
+// app APK; we ship them as ordinary /system/bin executables because the
+// privileged part runs from an init service, not from the app.
+//
+// RUNSTATEDIR and the config search path both point at /data/misc/amneziawg,
+// which is already one of the two defaults in wg-quick/android.c.
+
+cc_defaults {
+    name: "amneziawg_tools_defaults",
+    cflags: [
+        "-std=gnu11",
+        "-D_GNU_SOURCE",
+        "-DWIREGUARD_TOOLS_VERSION=\"3.1.20260812\"",
+        "-Wall",
+        "-Wextra",
+        "-Wno-unused-parameter",
+        "-Wno-missing-field-initializers",
+        "-Wno-sign-compare",
+    ],
+}
+
+cc_binary {
+    name: "awg",
+    defaults: ["amneziawg_tools_defaults"],
+    srcs: ["src/*.c"],
+    local_include_dirs: [
+        "src",
+        "src/uapi/linux",
+    ],
+    cflags: [
+        "-DRUNSTATEDIR=\"/data/misc\"",
+    ],
+}
+
+cc_binary {
+    name: "awg-quick",
+    defaults: ["amneziawg_tools_defaults"],
+    srcs: ["src/wg-quick/android.c"],
+}

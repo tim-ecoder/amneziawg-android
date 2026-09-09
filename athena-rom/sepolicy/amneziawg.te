@@ -1,0 +1,128 @@
+# Ядерный туннель AmneziaWG: домен для awg-tunnel.sh, который поднимает
+# интерфейс через awg-quick.
+#
+# На system_ext и coredomain, а не на vendor, по той же причине, что и
+# athena_devconfig: awg-quick настраивает DNS binder-вызовом к netd
+# (dnsResolver->setResolverConfiguration) и управляет сетью через ndc, а
+# вендорным доменам ходить в netd запрещено neverallow'ами.
+#
+# ВНИМАНИЕ: это первая редакция, собранная по разбору того, что awg-quick
+# реально делает (проверено на 5000194344 под adb root). Набор правил почти
+# наверняка потребует доводки по AVC-логам на устройстве -- собирать их надо
+# одним проходом под `setenforce 0`, иначе каждый следующий барьер виден только
+# после снятия предыдущего.
+
+type amneziawg, domain, coredomain;
+type amneziawg_exec, system_file_type, exec_type, file_type;
+
+init_daemon_domain(amneziawg)
+
+# Конфиги туннелей. Лежат в /data/misc/amneziawg, режим 600 root:root --
+# в них приватный ключ, поэтому отдельный тип, а не system_data_file.
+type amneziawg_data_file, file_type, data_file_type, core_data_file_type;
+allow amneziawg amneziawg_data_file:dir r_dir_perms;
+allow amneziawg amneziawg_data_file:file r_file_perms;
+
+# Скрипт -- shell, и он запускает awg, awg-quick, ip, iptables, ndc, am.
+# Все они в /system/bin и помечены как system_file/toolbox_exec/shell_exec.
+allow amneziawg shell_exec:file rx_file_perms;
+allow amneziawg toolbox_exec:file rx_file_perms;
+allow amneziawg system_file:file execute_no_trans;
+allow amneziawg system_file:file r_file_perms;
+
+# Само создание и настройка интерфейса.
+# `ip link add awg0 type amneziawg` и маршруты -- netlink route.
+# `awg setconf` разговаривает с модулем через generic netlink.
+allow amneziawg self:global_capability_class_set { net_admin net_raw };
+# ip-утилитам нужно всё, кроме ioctl -- ровно как в netutils_wrapper.te
+allow amneziawg self:netlink_route_socket ~ioctl;
+allow amneziawg self:netlink_xfrm_socket ~ioctl;
+# awg setconf общается с модулем через generic netlink
+allow amneziawg self:netlink_generic_socket create_socket_perms_no_ioctl;
+allow amneziawg self:udp_socket create_socket_perms;
+allow amneziawg self:rawip_socket create_socket_perms;
+
+# iptables/ip6tables: правила для fwmark 0x20000 и для UDP-порта туннеля.
+allow amneziawg self:netlink_netfilter_socket create_socket_perms_no_ioctl;
+
+# ndc управляет сетью через netd. Вопреки первому впечатлению это binder,
+# а не unix-сокет: типа netd_socket не существует вовсе, и netutils_wrapper.te
+# делает ровно так же.
+allow amneziawg netd_service:service_manager find;
+
+# DNS настраивается binder-вызовом в netd (сервис dnsresolver).
+binder_use(amneziawg)
+binder_call(amneziawg, netd)
+allow amneziawg dnsresolver_service:service_manager find;
+
+# `am broadcast` -- awg-quick шлёт REFRESH_TUNNEL_STATES. Приложения у нас нет,
+# broadcast уходит в пустоту, но вызов всё равно делается и без этих правил
+# упрётся в отказ.
+allow amneziawg activity_service:service_manager find;
+binder_call(amneziawg, system_server);
+allow amneziawg system_server:fd use;
+allow system_server amneziawg:fifo_file write;
+
+# Сплит по приложениям: awg-quick читает /data/system/packages.list, чтобы
+# перевести имена пакетов в UID для `ndc network users add`.
+allow amneziawg packages_list_file:file r_file_perms;
+allow amneziawg system_data_file:dir search;
+
+# Проверка, что модуль загружен: access("/sys/module/amneziawg").
+allow amneziawg sysfs:dir r_dir_perms;
+allow amneziawg sysfs:file r_file_perms;
+
+# Скрипт пишет в лог через `log -t`.
+unix_socket_connect(amneziawg, logdw, logd)
+
+# --- Добавлено по AVC-логам с 5000194344 (собраны одним проходом под
+# --- setenforce 0; в enforcing сервис доходил до первого iptables и откатывался).
+# Всё ниже — ровно то, что netutils_wrapper.te даёт своим ip/iptables/ndc,
+# просто у нас они запускаются из собственного домена.
+
+# iptables и iptables-save читают /proc/net/{ip,ip6}_tables_names
+allow amneziawg proc_net_type:file r_file_perms;
+
+# `ip` заглядывает в /data/misc/net
+r_dir_file(amneziawg, net_data_file)
+
+# iptables на Android перезагружает цепочку вместе с xt_bpf-правилами и для
+# этого читает закреплённые программы netd:
+#   denied { read } name="prog_netd_skfilter_allowlist_xtbpf" tcontext=fs_bpf_netd_shared
+allow amneziawg { fs_bpf fs_bpf_netd_shared }:dir search;
+allow amneziawg fs_bpf_netd_shared:file read;
+allow amneziawg usermodehelper:file r_file_perms;
+
+# `am broadcast` (REFRESH_TUNNEL_STATES): system_server отвечает обратно через
+# переданный fd и делает обратный binder-вызов. binder_call(amneziawg,
+# system_server) даёт только прямое направление, обратное нужно объявить явно —
+# AOSP так же поступает для dumpstate и incidentd в system_server.te.
+binder_call(system_server, amneziawg)
+allow system_server amneziawg:fd use;
+
+# Типы проперти для протокола с приложением (см. property_contexts и amneziawg_app.te).
+type amneziawg_prop, property_type;
+type ctl_amneziawg_prop, property_type;
+
+# Сервис отвечает приложению кодом возврата и читает имя интерфейса.
+set_prop(amneziawg, amneziawg_prop)
+
+# Файл состояния пишет сервис, читает приложение.
+allow amneziawg amneziawg_data_file:dir rw_dir_perms;
+allow amneziawg amneziawg_data_file:file create_file_perms;
+
+# amneziawg_up запускает и останавливает amneziawg_status (start/stop в скрипте).
+set_prop(amneziawg, ctl_amneziawg_prop)
+
+# Конфиг создаёт приложение, режим 0600 и владелец -- его uid. Сервис работает
+# от root, но объявленный в init.rc набор capabilities отбирает всё остальное,
+# включая DAC_OVERRIDE: без этих двух строк root не может прочитать чужой файл,
+# и awg-quick сообщает "Unable to find configuration file" -- при том, что файл
+# лежит на месте. Ровно те же грабли описаны в athena_devconfig.te.
+allow amneziawg self:capability { dac_override dac_read_search };
+
+# iptables на Android запускает xt_bpf-программу netd при перезагрузке цепочки:
+#   avc: denied { prog_run } scontext=u:r:amneziawg:s0 tcontext=u:r:bpfloader:s0 tclass=bpf
+# netutils_wrapper.te объявляет для этого bpfdomain и даёт то же самое право.
+typeattribute amneziawg bpfdomain;
+allow amneziawg bpfloader:bpf prog_run;

@@ -1,0 +1,62 @@
+--- a/src/wg-quick/android.c
++++ b/src/wg-quick/android.c
+@@ -31,7 +31,10 @@
+ #define AWG_PACKAGE_NAME "org.amnezia.awg"
+ #endif
+ #ifndef AWG_CONFIG_SEARCH_PATHS
+-#define AWG_CONFIG_SEARCH_PATHS "/data/misc/amneziawg /data/data/" AWG_PACKAGE_NAME "/files"
++/* athena: ищем только в /data/misc/amneziawg. Каталог приложения из списка убран:
++ * в нашей схеме конфиги туда не кладутся, а обход /data/data упирался в его
++ * MLS-категории (avc: denied search ... system_data_file:s0:c512,c768). */
++#define AWG_CONFIG_SEARCH_PATHS "/data/misc/amneziawg"
+ #endif
+ 
+ #define _printf_(x, y) __attribute__((format(printf, x, y)))
+@@ -455,21 +458,24 @@
+ 	char **tls_fingerprints; /* NULL terminated array of zero-terminated UTF-8 strings */
+ };
+ 
+-static void *on_create()
++static void *on_create(void *args)
+ {
++	(void)args;
+ 	fprintf(stderr, "Error: on_create called on proxy object\n");
+ 	exit(ENOTSUP);
+ 	return NULL;
+ }
+ 
+-static void on_destroy()
++static void on_destroy(void *userData)
+ {
++	(void)userData;
+ 	fprintf(stderr, "Error: on_destroy called on proxy object\n");
+ 	exit(ENOTSUP);
+ }
+ 
+-static binder_status_t on_transact()
++static binder_status_t on_transact(AIBinder *binder, transaction_code_t code, const AParcel *in, AParcel *out)
+ {
++	(void)binder; (void)code; (void)in; (void)out;
+ 	fprintf(stderr, "Error: on_transact called on a proxy object\n");
+ 	exit(ENOTSUP);
+ 	return 0;
+@@ -631,9 +637,18 @@
+ 	exit(errno);
+ }
+ 
++/* athena/LOS23.2: апстрим безусловно уходит в userspace amneziawg-go, как только
++ * в конфиге встречается любой обфускационный параметр (Jc/Jmin/Jmax/S1-S4/H1-H4),
++ * и наличие модуля ядра не проверяет вовсе. Наш модуль эти параметры принимает
++ * (проверено на реальном сервере), поэтому предпочитаем ядро, когда оно доступно. */
++static bool kernel_module_available(void)
++{
++	return access("/sys/module/amneziawg", F_OK) == 0;
++}
++
+ static void add_if(const char *iface)
+ {
+-	if (is_awg_on)
++	if (is_awg_on && !kernel_module_available())
+ 		cmd("amneziawg-go %s", iface);
+ 	else
+ 		cmd("ip link add %s type amneziawg", iface);

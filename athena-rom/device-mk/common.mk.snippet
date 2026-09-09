@@ -1,0 +1,12 @@
+# Ядерный туннель AmneziaWG.
+#
+# В прошивку входит ТОЛЬКО то, что не может приехать аддоном: модуль ядра
+# (привязан к ядру через vermagic и CRC символов, грузится из init.target.rc) и
+# sepolicy (компилируется в образы). Userspace -- тулзы awg/awg-quick, служба
+# awg-tunnel.sh, amneziawg.rc и приложение -- ставится аддоном awg-addon.zip,
+# который весит три мегабайта вместо полутора гигабайт. Метки для этих файлов в
+# file_contexts заданы заранее, поэтому аддон кладёт их сразу с нужным типом.
+#
+# Собрать их в прошивку обратно -- вернуть эти строки:
+#   PRODUCT_PACKAGES += awg awg-quick AmneziaWG
+#   PRODUCT_COPY_FILES += .../awg-tunnel.sh и .../amneziawg.rc

@@ -1,0 +1,7 @@
+#Load AmneziaWG kernel module. Грузит init, а не сервис amneziawg_up:
+#insmod требует CAP_SYS_MODULE, а выдавать его coredomain-домену незачем,
+#когда init и так это умеет -- ровно как с wlan.ko выше. Без загруженного
+#модуля awg-quick молча ушёл бы в userspace-go (проверка в add_if()).
+   insmod /vendor/lib/modules/amneziawg.ko
+
+#USB controller configuration

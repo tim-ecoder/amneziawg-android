@@ -1,0 +1,7 @@
+# Внешние модули ядра: AmneziaWG.
+# Собирается тем же тулчейном и против того же KERNEL_OBJ, что и само ядро, —
+# иначе получим ровно тот рассинхрон vermagic/CRC, который однажды уже убил
+# Wi-Fi (см. /data/@@LOS232/wifi-modversions/README.md).
+# Суффикс :kbuild — у модуля свой Kbuild, собирается как `make -C <ядро> M=<dir>`.
+TARGET_KERNEL_EXT_MODULE_ROOT := device/blackberry/sdm660-common/amneziawg/kmod
+TARGET_KERNEL_EXT_MODULES := src:kbuild

@@ -1,0 +1,16 @@
+# Ядерный туннель AmneziaWG: проперти, через которые приложение общается с
+# init-сервисом. Более длинный префикс перекрывает платформенный `sys.`,
+# так что эти ключи получают свой тип, а не system_prop.
+sys.amneziawg.              u:object_r:amneziawg_prop:s0 prefix
+# Состояние наших init-сервисов. Без своей метки приложение получает
+# "Access denied finding property init.svc.amneziawg_down" и не может дождаться
+# завершения предыдущего запуска перед новым ctl.start.
+init.svc.amneziawg_         u:object_r:amneziawg_prop:s0 prefix
+persist.sys.amneziawg.      u:object_r:amneziawg_prop:s0 prefix
+
+# Точечные ctl.* -- ровно как ctl.bootanim/ctl.dumpstate в платформе:
+# приложение может запустить эти три сервиса и никакие другие.
+ctl.amneziawg_up            u:object_r:ctl_amneziawg_prop:s0
+ctl.amneziawg_down          u:object_r:ctl_amneziawg_prop:s0
+ctl.amneziawg_status        u:object_r:ctl_amneziawg_prop:s0
+ctl.amneziawg_refresh       u:object_r:ctl_amneziawg_prop:s0

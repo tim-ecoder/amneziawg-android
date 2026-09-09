@@ -1,0 +1,122 @@
+diff --git a/src/Kbuild b/src/Kbuild
+index a154c7b..324375c 100644
+--- a/src/Kbuild
++++ b/src/Kbuild
+@@ -16,9 +16,16 @@ else
+ 	kbuild-dir := $(src)
+ endif
+ 
++# athena/LOS23.2: наше 4.19 уже несёт mainline lib/crypto (бэкпорт WireGuard 1.0.0),
++# поэтому свою zinc-крипту не собираем и используем ядерную.
++ifeq ($(wildcard $(srctree)/include/crypto/blake2s.h),)
+ ifeq ($(shell [ $(VERSION) -lt 5 -o \( $(VERSION) -eq 5 -a $(PATCHLEVEL) -lt 10 \) ] && echo y),y)
+ 	include $(src)/crypto/Kbuild.include
+ endif
++else
++ccflags-y += -DCOMPAT_KERNEL_HAS_LIB_CRYPTO
++ccflags-y += -DCOMPAT_ATHENA_419_CIP
++endif
+ include $(src)/compat/Kbuild.include
+ 
+ obj-$(if $(KBUILD_EXTMOD),m,$(CONFIG_AMNEZIAWG)) := amneziawg.o
+diff --git a/src/compat/compat.h b/src/compat/compat.h
+index 3b8606d..303d714 100644
+--- a/src/compat/compat.h
++++ b/src/compat/compat.h
+@@ -411,6 +411,7 @@ static inline u64 __compat_jiffies64_to_nsecs(u64 j)
+ }
+ #define jiffies64_to_nsecs __compat_jiffies64_to_nsecs
+ #endif
++#ifndef COMPAT_ATHENA_419_CIP  /* ядро уже содержит ktime_get_coarse_boottime_ns */
+ static inline u64 ktime_get_coarse_boottime_ns(void)
+ {
+ #if LINUX_VERSION_CODE < KERNEL_VERSION(3, 17, 0)
+@@ -422,6 +423,7 @@ static inline u64 ktime_get_coarse_boottime_ns(void)
+ #endif
+ }
+ #endif
++#endif
+ 
+ #if LINUX_VERSION_CODE < KERNEL_VERSION(3, 14, 0)
+ #include <linux/inetdevice.h>
+@@ -894,7 +896,7 @@ static inline void skb_mark_not_on_list(struct sk_buff *skb)
+ #endif
+ #endif
+ 
+-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 200) || (LINUX_VERSION_CODE < KERNEL_VERSION(4, 20, 0) && LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 249)) || (LINUX_VERSION_CODE < KERNEL_VERSION(4, 15, 0) && LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 285)) || (LINUX_VERSION_CODE < KERNEL_VERSION(4, 10, 0) && LINUX_VERSION_CODE >= KERNEL_VERSION(4, 9, 320))) && LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0) && !defined(ISUBUNTU2004)
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 200) || (LINUX_VERSION_CODE < KERNEL_VERSION(4, 20, 0) && LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 249)) || (LINUX_VERSION_CODE < KERNEL_VERSION(4, 15, 0) && LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 285)) || (LINUX_VERSION_CODE < KERNEL_VERSION(4, 10, 0) && LINUX_VERSION_CODE >= KERNEL_VERSION(4, 9, 320))) && LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0) && !defined(ISUBUNTU2004) && !defined(COMPAT_KERNEL_HAS_LIB_CRYPTO)
+ #define COMPAT_INIT_CRYPTO
+ #define blake2s_init zinc_blake2s_init
+ #define blake2s_init_key zinc_blake2s_init_key
+@@ -946,7 +948,7 @@ static inline void skb_mark_not_on_list(struct sk_buff *skb)
+ #define chacha20_neon zinc_chacha20_neon
+ #endif
+ 
+-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0)
++#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0) && !defined(COMPAT_KERNEL_HAS_LIB_CRYPTO)
+ #define COMPAT_CRYPTO_IS_ZINC
+ #define COMPAT_MAYBE_SIMD_CONTEXT(ctx) , ctx
+ #else
+@@ -1091,6 +1093,7 @@ static inline void skb_reset_redirect(struct sk_buff *skb)
+ #include <linux/skbuff.h>
+ #include <linux/ip.h>
+ #include <linux/ipv6.h>
++#ifndef COMPAT_ATHENA_419_CIP  /* ядро уже содержит ip_tunnel_parse_protocol */
+ static inline __be16 ip_tunnel_parse_protocol(const struct sk_buff *skb)
+ {
+ 	if (skb_network_header(skb) >= skb->head &&
+@@ -1103,6 +1106,7 @@ static inline __be16 ip_tunnel_parse_protocol(const struct sk_buff *skb)
+ 		return htons(ETH_P_IPV6);
+ 	return 0;
+ }
++#endif
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0) || defined(ISRHEL8)
+ static const struct header_ops ip_tunnel_header_ops = { .parse_protocol = ip_tunnel_parse_protocol };
+ #else
+@@ -1149,6 +1153,7 @@ struct dst_cache_pcpu {
+     !(LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 7) && LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)) && \
+     !(LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 84) && LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)) && \
+     !defined(ISRHEL9)
++#ifndef COMPAT_ATHENA_419_CIP  /* ядро уже содержит dst_cache_reset_now */
+ static inline void dst_cache_reset_now(struct dst_cache *dst_cache)
+ {
+ 	int i;
+@@ -1167,6 +1172,7 @@ static inline void dst_cache_reset_now(struct dst_cache *dst_cache)
+ 	}
+ }
+ #endif
++#endif
+ 
+ #if defined(ISUBUNTU1604) || defined(ISRHEL7)
+ #include <linux/siphash.h>
+@@ -1252,7 +1258,6 @@ static inline u32 get_random_u32_inclusive(u32 floor, u32 ceil)
+ #endif
+ 
+ #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 2) && \
+-	!(LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 296) && LINUX_VERSION_CODE < KERNEL_VERSION(4, 20, 0)) && \
+ 	!(LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 229) && LINUX_VERSION_CODE < KERNEL_VERSION(5, 5, 0)) && \
+ 	!(LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 163) && LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)) && \
+ 	!(LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 86) && LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0))
+@@ -1354,11 +1359,13 @@ static inline void netif_set_tso_max_size(struct net_device *dev, unsigned int s
+ #endif
+ 
+ #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 0)
++#ifndef COMPAT_ATHENA_419_CIP  /* ядро уже содержит skb_queue_empty_lockless */
+ static inline bool skb_queue_empty_lockless(const struct sk_buff_head *list)
+ {
+ 	return READ_ONCE(list->next) == (const struct sk_buff *) list;
+ }
+ #endif
++#endif
+ 
+ #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0)
+ #define NLA_POLICY_MASK(tp, _mask) { .type = tp }
+@@ -1455,3 +1462,8 @@ static inline void __compat_chacha20_crypt(struct chacha_state *state,
+ #endif
+ 
+ #endif /* _WG_COMPAT_H */
++
++/* athena/LOS23.2: в 4.19 функция называется del_timer_sync */
++#ifndef timer_delete_sync
++#define timer_delete_sync del_timer_sync
++#endif

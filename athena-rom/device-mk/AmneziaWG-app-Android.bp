@@ -1,0 +1,23 @@
+// AmneziaWG (наша сборка) -- UI для ядерного туннеля.
+//
+// Отличия от апстрима (патч: /data/@@VPS/android-module/app-fork/):
+//   * нативная часть выброшена -- awg/awg-quick приезжают из ROM, go-бэкенда нет;
+//   * AwgQuickBackend не использует RootShell: root на устройстве не нужен,
+//     всё делегируется init-сервису amneziawg_up/down (см. ServiceControl.java).
+//
+// certificate: "platform" -- обязательно, а не вкусовщина: платформенная подпись
+// даёт seinfo=platform, по которому seapp_contexts заводит домен amneziawg_app.
+// Без неё приложение попадёт в untrusted_app и не сможет ни поставить
+// sys.amneziawg.iface, ни дёрнуть ctl.start.
+//
+// privileged не выставлен намеренно: priv-app разрешения приложению не нужны,
+// все его особые права выданы точечно в amneziawg_app.te.
+android_app_import {
+    name: "AmneziaWG",
+    apk: "AmneziaWG.apk",
+    certificate: "platform",
+    system_ext_specific: true,
+    dex_preopt: {
+        enabled: false,
+    },
+}
