@@ -82,6 +82,14 @@ where the subtlety is, and every rule in it was paid for:
   port of the tools — a first attempt silently did nothing at all — and the
   stripped config **must** carry `FwMark` back, or `setconf` zeroes the mark and
   the tunnel's own packets get routed into the tunnel.
+* **A network change is a change of address, not of interface name.** On
+  unstable LTE `rmnet_data1` survives a PDP context rebuild and a cell handover:
+  the name stays while the source address and the operator's NAT mapping are
+  new, the session on the far side is dead, and a name-only check sees nothing.
+  The tunnel then waited for the staleness watchdog — 180 s without a handshake
+  — and looked hung for minutes. The watcher tracks the interface together with
+  the source address `ip route get` reports, and treats a route that disappears
+  and returns as a change even at the same address.
 * **Recovery means a fresh handshake or real received bytes, not bytes alone.**
   An idle phone moves about 6 KB in 45 s, so a bytes-only threshold is never
   met: the watcher recreated the socket every 20 s forever, tearing down a

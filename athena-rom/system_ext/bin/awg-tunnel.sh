@@ -73,13 +73,25 @@ hs_ts() { awk -F'\t' -v i="$1" '$1 == i && NF == 9 { print $6; exit }' "$STATUS"
 # Принятые байты пира -- из того же файла состояния.
 rx_bytes() { awk -F'\t' -v i="$1" '$1 == i && NF == 9 { print $7+0; exit }' "$STATUS" 2>/dev/null; }
 
-# Через какой интерфейс сейчас уходят наружу пакеты туннеля. Именно это
-# меняется при переходе wifi <-> мобильная сеть.
-outbound_dev() {
+# Каким путём сейчас уходят наружу пакеты туннеля: интерфейс И адрес источника.
+#
+# Одного интерфейса мало, и это стоило зависшего туннеля на нестабильном LTE.
+# Имя `rmnet_data1` переживает и пересборку PDP-контекста, и переход между
+# сотами: интерфейс тот же, а адрес и NAT-трансляция у оператора уже новые.
+# Смены сети при этом не видно, поэтому туннель молчал, пока не срабатывал
+# сторож по возрасту хендшейка -- а тот ждёт HS_STALE, три минуты. Адрес
+# источника меняется в тот же миг, что и путь, и ловится сразу.
+outbound_path() {
     EP=$(awg show "$1" endpoints 2>/dev/null | head -1 | awk '{print $2}')
     [ -n "$EP" ] || return 1
     MK=$(awg show "$1" fwmark 2>/dev/null); [ -n "$MK" ] || MK=0x20000
-    ip route get "${EP%:*}" mark "$MK" 2>/dev/null | head -1 | sed -n 's/.* dev \([^ ]*\).*/\1/p'
+    ip route get "${EP%:*}" mark "$MK" 2>/dev/null | head -1 | awk '{
+        for (i = 1; i < NF; i++) {
+            if ($i == "dev") dev = $(i + 1)
+            if ($i == "src") src = $(i + 1)
+        }
+        if (dev != "") print dev " " src
+    }'
 }
 
 # Пересоздание UDP-сокета сменой listen-port. Не ломает ни маршрутов, ни
@@ -230,21 +242,33 @@ status)
     # 1628 с). Быстрый путь всё равно даёт приложение через refresh, здесь --
     # надёжный: сеть могла смениться, пока приложение заморожено в doze.
     log "слежу за $IFACE, период $STATUS_PERIOD с"
-    DEV=$(outbound_dev "$IFACE")
+    DEV=$(outbound_path "$IFACE")
     TRY=0; DEADLINE=0; RX0=0; HS0=; LAST_REBIND=0
+    # Был ли путь наружу потерян с прошлой итерации: пропажа маршрута и возврат
+    # на тот же адрес -- это тоже смена сети. У оператора за время провала
+    # успевает смениться NAT-трансляция, сессия на той стороне мертва, а по
+    # именам и адресам не видно ничего.
+    LOST=0
     # Отсчёт "хендшейка не было ни разу" ведём от старта слежения.
     NOHS_SINCE=$(date +%s)
     while [ -n "$(awg show interfaces 2>/dev/null)" ]; do
         write_status
-        NOW=$(outbound_dev "$IFACE")
+        NOW=$(outbound_path "$IFACE")
         T=$(date +%s)
-        # Пока ждём восстановления -- поддерживаем повод для хендшейка.
-        [ "$DEADLINE" != 0 ] && provoke "$IFACE"
+        REBOUND=0
 
-        if [ -n "$NOW" ] && [ -n "$DEV" ] && [ "$NOW" != "$DEV" ]; then
-            log "$IFACE: сеть сменилась, $DEV -> $NOW, пересоздаю сокет"
+        if [ -z "$NOW" ]; then
+            # Маршрута наружу нет вовсе -- самолётный режим, провал LTE. Дёргать
+            # сокет незачем, но возврат связи надо считать сменой сети.
+            [ "$LOST" = 0 ] && log "$IFACE: пути наружу нет, жду"
+            LOST=1
+        fi
+
+        if [ -n "$NOW" ] && { { [ -n "$DEV" ] && [ "$NOW" != "$DEV" ]; } || [ "$LOST" = 1 ]; }; then
+            log "$IFACE: сеть сменилась, ${DEV:-нет} -> $NOW, пересоздаю сокет"
+            LOST=0
             RX0=$(rx_bytes "$IFACE"); HS0=$(hs_ts "$IFACE")
-            rebind "$IFACE"; LAST_REBIND=$T; TRY=1; DEADLINE=$(( T + RETRY_GAP ))
+            rebind "$IFACE"; LAST_REBIND=$T; TRY=1; DEADLINE=$(( T + RETRY_GAP )); REBOUND=1
         elif [ "$DEADLINE" != 0 ] && { [ "$(hs_ts "$IFACE")" != "$HS0" ] \
              || [ $(( $(rx_bytes "$IFACE") - RX0 )) -gt $RX_ALIVE ]; }; then
             # Выздоровление -- ЛИБО новый хендшейк, ЛИБО заметный прирост rx.
@@ -269,7 +293,7 @@ status)
             # маршрута вовсе (самолётный режим), дёргать сокет незачем.
             TRY=$(( TRY + 1 ))
             log "$IFACE: связи нет, пересоздаю сокет ещё раз (попытка $TRY)"
-            rebind "$IFACE"; LAST_REBIND=$T; DEADLINE=$(( T + RETRY_GAP ))
+            rebind "$IFACE"; LAST_REBIND=$T; DEADLINE=$(( T + RETRY_GAP )); REBOUND=1
         elif [ "$DEADLINE" = 0 ]; then
             # Сторож на случай, когда интерфейс тот же, а связь всё равно встала.
             AGE=$(hs_ts "$IFACE")
@@ -289,9 +313,16 @@ status)
             if [ "$STALE" -gt $HS_STALE ] && [ $(( T - LAST_REBIND )) -gt $REBIND_MIN_GAP ]; then
                 log "$IFACE: хендшейка нет $STALE с, пересоздаю сокет"
                 RX0=$(rx_bytes "$IFACE"); HS0=$AGE
-                rebind "$IFACE"; LAST_REBIND=$T; TRY=1; DEADLINE=$(( T + RETRY_GAP )); NOHS_SINCE=$T
+                rebind "$IFACE"; LAST_REBIND=$T; TRY=1; DEADLINE=$(( T + RETRY_GAP )); NOHS_SINCE=$T; REBOUND=1
             fi
         fi
+
+        # Пока ждём восстановления -- поддерживаем повод для хендшейка. Именно
+        # здесь, а не в начале итерации: там этот сброс успевал сработать за
+        # мгновение до того, как проверка увидит уже вернувшуюся связь, и на
+        # каждое переключение приходился лишний setconf. `rebind` зовёт
+        # `provoke` сам, поэтому после него второй раз не нужно.
+        [ "$DEADLINE" != 0 ] && [ "$REBOUND" = 0 ] && provoke "$IFACE"
 
         [ -n "$NOW" ] && DEV="$NOW"
         sleep $STATUS_PERIOD
