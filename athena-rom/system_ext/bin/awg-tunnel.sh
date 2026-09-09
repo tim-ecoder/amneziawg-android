@@ -56,6 +56,19 @@ STATUS_PERIOD=10
 # поэтому 180 с без него -- уже не норма.
 HS_STALE=180
 REBIND_MIN_GAP=60
+# Признак "отправляем, а в ответ тишина". Во время разговора или загрузки
+# трафик идёт непрерывно, и если за окно ушло заметно байт, а не пришло ни
+# одного, туннель мёртв -- гадать не о чем. Замер 17:48-17:56 на 5000014556:
+# сотовый звонок увёл телефон с данных, оператор пересобрал сессию, локально
+# не изменилось ничего (тот же rmnet_data1, тот же адрес), и сторож по возрасту
+# хендшейка ждал свои 180 с, растянув пятиминутный провал сети до шести минут.
+# Этот признак ловит тот же случай за два окна, то есть за 20 с.
+#
+# Порог именно по tx, а не "rx == 0": на простое keepalive уходит в одну
+# сторону и ответа не требует, поэтому малый tx без rx -- норма. 4 КиБ за
+# окно -- это уже настоящий обмен, на который сервер обязан был ответить.
+RX_STALL_TX=4096
+RX_STALL_STRIKES=2
 # Шаг повторных попыток после смены сети и порог "связь ожила" по приросту rx.
 # 12 с. Каждый новый порт -- новая попытка пробиться: замер на 5000014556
 # (22:21-22:23) показал, что после ухода на LTE первые два порта молчали по
@@ -65,6 +78,16 @@ REBIND_MIN_GAP=60
 # Раньше короткий шаг был опасен именно из-за сломанного признака.
 RETRY_GAP=12
 RX_ALIVE=8192
+# Потолок шага повторных попыток. Шаг удваивается на каждой неудаче: пока сети
+# нет по-настоящему (самолётный режим, метро, долгий разговор), дёргать сокет
+# раз в 12 с -- это только расход батареи. Потолок 120 с выбран не наугад: без
+# новых попыток ядро само переспрашивает хендшейк около 90 с
+# (REKEY_ATTEMPT_TIME), и шаг больше этого оставил бы туннель совсем молчащим.
+RETRY_MAX=120
+# Период опроса, когда пути наружу нет вовсе. Делать в этом состоянии нечего,
+# а возврат сети мы всё равно заметим -- он выглядит как смена пути. Шесть
+# итераций в минуту превращаются в одну.
+IDLE_PERIOD=60
 
 log() { /system/bin/log -t "$TAG" -p i "$*" 2>/dev/null; }
 reply() { setprop sys.amneziawg.result "$1:$2"; }
@@ -89,8 +112,9 @@ write_status() {
 # endpoint, allowed-ips, latest-handshake, rx, tx, keepalive.
 hs_ts() { awk -F'\t' -v i="$1" '$1 == i && NF == 9 { print $6; exit }' "$STATUS" 2>/dev/null; }
 
-# Принятые байты пира -- из того же файла состояния.
+# Принятые и отправленные байты пира -- из того же файла состояния.
 rx_bytes() { awk -F'\t' -v i="$1" '$1 == i && NF == 9 { print $7+0; exit }' "$STATUS" 2>/dev/null; }
+tx_bytes() { awk -F'\t' -v i="$1" '$1 == i && NF == 9 { print $8+0; exit }' "$STATUS" 2>/dev/null; }
 
 # Каким путём сейчас уходят наружу пакеты туннеля: интерфейс И адрес источника.
 #
@@ -210,43 +234,54 @@ provoke() {
 # --- слежение за одним интерфейсом: состояние между итерациями ---
 #
 # Переменные одной итерации: DEV, TRY, DEADLINE, RX0, HS0, LAST_REBIND, LOST,
-# NOHS_SINCE. Между итерациями они лежат в <имя>_<ключ>, где ключ -- имя
-# интерфейса с заменой всего, кроме букв и цифр, на "_".
+# NOHS_SINCE, PREV_RX, PREV_TX, STALL, GAP. Между итерациями они лежат в
+# <имя>_<ключ>, где ключ -- имя интерфейса с заменой всего, кроме букв и цифр,
+# на "_".
 watch_key() { printf '%s' "$1" | tr -c 'A-Za-z0-9' '_'; }
 
 watch_load() {
     K=$(watch_key "$1")
     eval "DEV=\${DEV_$K:-}; TRY=\${TRY_$K:-0}; DEADLINE=\${DEADLINE_$K:-0}; \
           RX0=\${RX0_$K:-0}; HS0=\${HS0_$K:-}; LAST_REBIND=\${LAST_REBIND_$K:-0}; \
-          LOST=\${LOST_$K:-0}; NOHS_SINCE=\${NOHS_SINCE_$K:-$2}"
+          LOST=\${LOST_$K:-0}; NOHS_SINCE=\${NOHS_SINCE_$K:-$2}; \
+          PREV_RX=\${PREV_RX_$K:--1}; PREV_TX=\${PREV_TX_$K:--1}; \
+          STALL=\${STALL_$K:-0}; GAP=\${GAP_$K:-$RETRY_GAP}"
 }
 
 watch_save() {
     K=$(watch_key "$1")
     eval "DEV_$K=\$DEV; TRY_$K=\$TRY; DEADLINE_$K=\$DEADLINE; RX0_$K=\$RX0; \
-          HS0_$K=\$HS0; LAST_REBIND_$K=\$LAST_REBIND; LOST_$K=\$LOST; NOHS_SINCE_$K=\$NOHS_SINCE"
+          HS0_$K=\$HS0; LAST_REBIND_$K=\$LAST_REBIND; LOST_$K=\$LOST; NOHS_SINCE_$K=\$NOHS_SINCE; \
+          PREV_RX_$K=\$PREV_RX; PREV_TX_$K=\$PREV_TX; STALL_$K=\$STALL; GAP_$K=\$GAP"
 }
 
 # Одна итерация слежения за интерфейсом $1 в момент $2 (секунды).
 watch_iter() {
     IFACE="$1"; T="$2"
     NOW=$(outbound_path "$IFACE")
-    REBOUND=0
+    RXN=$(rx_bytes "$IFACE"); TXN=$(tx_bytes "$IFACE")
+    [ -n "$RXN" ] || RXN=0; [ -n "$TXN" ] || TXN=0
+    # Как скоро будить цикл в следующий раз. Пока всё обычно -- как раньше.
+    WANT=$STATUS_PERIOD
 
     if [ -z "$NOW" ]; then
         # Маршрута наружу нет вовсе -- самолётный режим, провал LTE. Дёргать
         # сокет незачем, но возврат связи надо считать сменой сети.
         [ "$LOST" = 0 ] && log "$IFACE: пути наружу нет, жду"
         LOST=1
+        STALL=0
+        # Опрашиваем реже: пакету всё равно некуда идти, а возврат сети виден
+        # как смена пути и заметится не позже чем через IDLE_PERIOD.
+        [ "$DEADLINE" = 0 ] && WANT=$IDLE_PERIOD
     fi
 
     if [ -n "$NOW" ] && { { [ -n "$DEV" ] && [ "$NOW" != "$DEV" ]; } || [ "$LOST" = 1 ]; }; then
         log "$IFACE: сеть сменилась, ${DEV:-нет} -> $NOW, пересоздаю сокет"
         LOST=0
-        RX0=$(rx_bytes "$IFACE"); HS0=$(hs_ts "$IFACE")
-        rebind "$IFACE"; LAST_REBIND=$T; TRY=1; DEADLINE=$(( T + RETRY_GAP )); REBOUND=1
+        RX0=$RXN; HS0=$(hs_ts "$IFACE"); STALL=0; GAP=$RETRY_GAP
+        rebind "$IFACE"; LAST_REBIND=$T; TRY=1; DEADLINE=$(( T + GAP )); REBOUND=1
     elif [ "$DEADLINE" != 0 ] && { [ "$(hs_ts "$IFACE")" != "$HS0" ] \
-         || [ $(( $(rx_bytes "$IFACE") - RX0 )) -gt $RX_ALIVE ]; }; then
+         || [ $(( RXN - RX0 )) -gt $RX_ALIVE ]; }; then
         # Выздоровление -- ЛИБО новый хендшейк, ЛИБО заметный прирост rx.
         #
         # Одного прироста rx мало, и это стоило целого дня разбора: на
@@ -261,16 +296,31 @@ watch_iter() {
         # сервер узнал новый адрес и ответы доходят. Прирост rx оставлен
         # вторым признаком: он срабатывает раньше, когда трафик уже идёт.
         log "$IFACE: связь восстановлена с $TRY-й попытки"
-        TRY=0; DEADLINE=0
+        TRY=0; DEADLINE=0; GAP=$RETRY_GAP; STALL=0
     elif [ "$DEADLINE" != 0 ] && [ "$T" -ge "$DEADLINE" ] && [ -n "$NOW" ]; then
         # Повторяем, пока не поможет. Пересоздание сокета не ломает ни
         # маршрутов, ни правил netd, ни соединений поверх туннеля, поэтому
         # повторять его безопасно. Условие -n "$NOW": пока наружу нет
         # маршрута вовсе (самолётный режим), дёргать сокет незачем.
         TRY=$(( TRY + 1 ))
-        log "$IFACE: связи нет, пересоздаю сокет ещё раз (попытка $TRY)"
-        rebind "$IFACE"; LAST_REBIND=$T; DEADLINE=$(( T + RETRY_GAP )); REBOUND=1
+        # Шаг удваивается до потолка: первые попытки идут часто, а если сети нет
+        # всерьёз -- переходим на редкие, чтобы не разряжать батарею впустую.
+        GAP=$(( GAP * 2 )); [ "$GAP" -gt $RETRY_MAX ] && GAP=$RETRY_MAX
+        log "$IFACE: связи нет, пересоздаю сокет ещё раз (попытка $TRY, следующая через $GAP с)"
+        rebind "$IFACE"; LAST_REBIND=$T; DEADLINE=$(( T + GAP )); REBOUND=1
+    elif [ "$DEADLINE" = 0 ] && [ -n "$NOW" ] && [ "$PREV_TX" -ge 0 ] \
+         && [ $(( TXN - PREV_TX )) -ge $RX_STALL_TX ] && [ $(( RXN - PREV_RX )) -le 0 ]; then
+        # Отправляем, а в ответ ничего. Считаем подряд идущие такие окна: одного
+        # мало, ответ мог задержаться; два подряд -- это уже 20 с односторонней
+        # связи, и туннель мёртв.
+        STALL=$(( STALL + 1 ))
+        if [ "$STALL" -ge $RX_STALL_STRIKES ]; then
+            log "$IFACE: отправлено $(( TXN - PREV_TX )) Б, принято 0, окон подряд $STALL -- пересоздаю сокет"
+            RX0=$RXN; HS0=$(hs_ts "$IFACE"); STALL=0; GAP=$RETRY_GAP
+            rebind "$IFACE"; LAST_REBIND=$T; TRY=1; DEADLINE=$(( T + GAP )); REBOUND=1
+        fi
     elif [ "$DEADLINE" = 0 ]; then
+        STALL=0
         # Сторож на случай, когда интерфейс тот же, а связь всё равно встала.
         AGE=$(hs_ts "$IFACE")
         case "$AGE" in
@@ -288,8 +338,8 @@ watch_iter() {
         esac
         if [ "$STALE" -gt $HS_STALE ] && [ $(( T - LAST_REBIND )) -gt $REBIND_MIN_GAP ]; then
             log "$IFACE: хендшейка нет $STALE с, пересоздаю сокет"
-            RX0=$(rx_bytes "$IFACE"); HS0=$AGE
-            rebind "$IFACE"; LAST_REBIND=$T; TRY=1; DEADLINE=$(( T + RETRY_GAP )); NOHS_SINCE=$T; REBOUND=1
+            RX0=$RXN; HS0=$AGE; GAP=$RETRY_GAP
+            rebind "$IFACE"; LAST_REBIND=$T; TRY=1; DEADLINE=$(( T + GAP )); NOHS_SINCE=$T; REBOUND=1
         fi
     fi
 
@@ -298,8 +348,15 @@ watch_iter() {
     # мгновение до того, как проверка увидит уже вернувшуюся связь, и на
     # каждое переключение приходился лишний setconf. `rebind` зовёт
     # `provoke` сам, поэтому после него второй раз не нужно.
-    [ "$DEADLINE" != 0 ] && [ "$REBOUND" = 0 ] && provoke "$IFACE"
+    # Пока ждём восстановления с большим шагом, будить цикл каждые 10 с незачем:
+    # всё, что мы сделаем, -- сравним время. Просыпаемся вдвое чаще шага, чтобы
+    # не проспать ни возврат сети, ни срок следующей попытки.
+    if [ "$DEADLINE" != 0 ] && [ "$GAP" -gt $(( STATUS_PERIOD * 2 )) ]; then
+        WANT=$(( GAP / 2 ))
+        [ "$WANT" -gt $IDLE_PERIOD ] && WANT=$IDLE_PERIOD
+    fi
 
+    PREV_RX=$RXN; PREV_TX=$TXN
     [ -n "$NOW" ] && DEV="$NOW"
     return 0
 }
@@ -550,12 +607,15 @@ status)
         ALL=$(awg show interfaces 2>/dev/null)
         [ -n "$ALL" ] || break
         T=$(date +%s)
+        # Спим столько, сколько просит самый нетерпеливый из интерфейсов.
+        NEXT=$IDLE_PERIOD
         for IFACE in $ALL; do
             watch_load "$IFACE" "$T"
             watch_iter "$IFACE" "$T"
             watch_save "$IFACE"
+            [ "$WANT" -lt "$NEXT" ] && NEXT=$WANT
         done
-        sleep $STATUS_PERIOD
+        sleep $NEXT
     done
     write_status
     ;;
