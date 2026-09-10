@@ -6,7 +6,7 @@
 # образам), поэтому аддон работает только поверх нашей прошивки.
 #
 # Использование: ./build-addon.sh [подписанный APK]
-#   APK по умолчанию -- ../app-fork/AmneziaWG-athena-platform.apk
+#   APK по умолчанию -- свежайший ../app-fork/amneziawg-kernel-krab-*.apk
 #   (подписан платформенным ключом, иначе не будет домена amneziawg_app).
 #
 # Метаданные (META-INF/com/android/metadata и metadata.pb) генерируются
@@ -22,7 +22,9 @@ ROM=/data/awg-app-build/amneziawg-android/athena-rom
 KEYS=/data/@SIGNING-KEYS/signing-keys
 HOST=/data/los23out2/host/linux-x86
 SIGNAPK="java -Djava.library.path=$HOST/lib64 -jar $HOST/framework/signapk.jar"
-APK="${1:-$HERE/../app-fork/AmneziaWG-athena-platform.apk}"
+# По умолчанию берём последнюю подписанную сборку с именем вида
+# amneziawg-kernel-krab-vX.Ya.apk; путь можно передать первым аргументом.
+APK="${1:-$(ls -t "$HERE"/../app-fork/amneziawg-kernel-*.apk 2>/dev/null | head -1)}"
 PREV="$HERE/awg-kernel-addon.zip"
 WORK="$(mktemp -d /tmp/claude-1000/-data-LOS232/addon.XXXXXX 2>/dev/null || mktemp -d)"
 

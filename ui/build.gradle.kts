@@ -35,6 +35,9 @@ android {
         // versionCode двигает athenaBuild, versionName несёт нашу версию сборки
         // (krabVersion) -- ту же, что у прошивки, чтобы по экрану «о программе»
         // было видно, какая сборка стоит.
+        // Имя выходного файла: amneziawg-kernel-krab-vX.Ya. Так по одному файлу
+        // видно и что это наша сборка, и какой версии, без заглядывания внутрь.
+        base.archivesName.set("amneziawg-kernel-" + providers.gradleProperty("krabVersion").get())
         val athenaBuild = providers.gradleProperty("athenaBuild").get().toInt()
         versionCode = providers.gradleProperty("amneziawgVersionCode").get().toInt() * 1000 + athenaBuild
         versionName = providers.gradleProperty("amneziawgVersionName").get() + "-" +
