@@ -16,7 +16,9 @@
 # update-binary и тулзы.
 set -e
 HERE="$(cd "$(dirname "$0")" && pwd)"
-DEV=/data/LOS232/device/blackberry/sdm660-common
+# Userspace живёт в форке приложения, а не в дереве устройства: в дереве
+# остаётся только то, что попадает в образ (модуль ядра и sepolicy).
+ROM=/data/awg-app-build/amneziawg-android/athena-rom
 KEYS=/data/@SIGNING-KEYS/signing-keys
 HOST=/data/los23out2/host/linux-x86
 SIGNAPK="java -Djava.library.path=$HOST/lib64 -jar $HOST/framework/signapk.jar"
@@ -31,8 +33,8 @@ cd "$WORK"
 # Каркас из прежнего zip: метаданные, update-binary, updater-script, тулзы.
 unzip -q "$PREV" -x 'META-INF/com/android/otacert' 'META-INF/MANIFEST.MF' 'META-INF/CERT.*' 2>/dev/null
 # Свежие служба, rc, addon.d и APK.
-install -m 0755 "$DEV/system_ext/bin/awg-tunnel.sh"       system/system_ext/bin/awg-tunnel.sh
-install -m 0644 "$DEV/system_ext/etc/init/amneziawg.rc"   system/system_ext/etc/init/amneziawg.rc
+install -m 0755 "$ROM/system_ext/bin/awg-tunnel.sh"       system/system_ext/bin/awg-tunnel.sh
+install -m 0644 "$ROM/system_ext/etc/init/amneziawg.rc"   system/system_ext/etc/init/amneziawg.rc
 install -m 0755 "$HERE/71-amneziawg.sh"                    system/addon.d/71-amneziawg.sh
 install -m 0644 "$HERE/updater-script"                     META-INF/com/google/android/updater-script
 install -m 0644 "$APK"                                     system/system_ext/app/AmneziaWG/AmneziaWG.apk
