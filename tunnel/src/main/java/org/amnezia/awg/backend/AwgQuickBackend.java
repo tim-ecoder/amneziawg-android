@@ -250,8 +250,12 @@ public final class AwgQuickBackend implements Backend {
 
         if (state == State.TOGGLE)
             state = originalState == State.UP ? State.DOWN : State.UP;
-        if ((state == State.UP && originalState == State.UP && originalConfig != null && originalConfig == config) ||
-                (state == State.DOWN && originalState == State.DOWN))
+        // Раньше здесь был ещё и ранний выход на "уже опущен". Он не давал
+        // команде дойти до службы, а наша модель о состоянии ядра знает лишь по
+        // файлу состояния и вполне может ошибаться -- так и оставались жить
+        // интерфейсы, которых в приложении уже нет. Служба идемпотентна, лишний
+        // down ей ничего не стоит.
+        if (state == State.UP && originalState == State.UP && originalConfig != null && originalConfig == config)
             return originalState;
         if (state == State.UP) {
             if (!multipleTunnels && originalState == State.DOWN) {

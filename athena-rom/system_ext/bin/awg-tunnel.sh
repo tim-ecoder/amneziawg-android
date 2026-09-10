@@ -526,6 +526,27 @@ up)
     case "$(awg show "$IFACE" public-key 2>/dev/null)" in
         ''|'(none)') log "awg setconf $IFACE не прошёл"; ip link del "$IFACE" 2>/dev/null; reply "$IFACE" 1; exit 1 ;;
     esac
+    # Два туннеля с ОДНИМ ключом пира на один сервер воюют друг с другом.
+    #
+    # Сервер хранит сессию по открытому ключу пира, и она может быть только
+    # одна. Второй интерфейс с тем же ключом раз в 120 с делает свою смену
+    # ключей и перехватывает сессию на себя; первый уходит в пустоту, пока сам
+    # не перехватит обратно. Замер на 5000014556: с двумя такими туннелями
+    # 7,3 % потерь и провалы по 7-15 с каждые две минуты, после снятия
+    # двойника -- 0,1 % и ни одного провала. Внешне это выглядело как
+    # замирания ввода, и найти причину стоило дня.
+    MYKEYS=$(awg show "$IFACE" peers 2>/dev/null)
+    for OTHER in $(awg show interfaces 2>/dev/null); do
+        [ "$OTHER" = "$IFACE" ] && continue
+        for K in $MYKEYS; do
+            if awg show "$OTHER" peers 2>/dev/null | grep -qxF "$K"; then
+                log "$IFACE: ключ пира совпадает с уже поднятым $OTHER -- отказываюсь"
+                log "$IFACE: два туннеля с одним ключом на один сервер перехватывают сессию друг у друга"
+                ip link del "$IFACE" 2>/dev/null
+                reply "$IFACE" 6; exit 1
+            fi
+        done
+    done
     awg set "$IFACE" fwmark 0x20000 2>/dev/null
     # Адрес на awg0 НЕ ставим, он есть на tun у VpnService, и этого достаточно.
     #
@@ -621,8 +642,13 @@ down)
     # VpnService приложение уже остановило (tun и его таблица ушли вместе с ним);
     # нам остаются правила iptables и сам интерфейс.
     iptables_cleanup "$IFACE"
-    while ip rule del pref $OWN_RULE_PREF 2>/dev/null; do :; done
     ip link del "$IFACE" 2>&1 | while read -r l; do log "$l"; done
+    # Правило маршрутизации общее для всех туннелей: у них один tun и одна
+    # таблица. Снимаем его, только если поднятых интерфейсов не осталось --
+    # иначе опускание одного туннеля обрывало бы связь остальным.
+    if [ -z "$(awg show interfaces 2>/dev/null)" ]; then
+        while ip rule del pref $OWN_RULE_PREF 2>/dev/null; do :; done
+    fi
     ip link show "$IFACE" >/dev/null 2>&1 && reply "$IFACE" 1 || reply "$IFACE" 0
     write_status
     # Если остались другие поднятые туннели, слежение возвращаем. Служба

@@ -68,8 +68,15 @@ class TunnelManager(private val configStore: ConfigStore) : BaseObservable() {
             lastUsedTunnel = null
         tunnelMap.remove(tunnel)
         try {
-            if (originalState == Tunnel.State.UP)
-                withContext(Dispatchers.IO) { getBackend().setState(tunnel, Tunnel.State.DOWN, null) }
+            // Опускаем ВСЕГДА, а не только когда наша модель считает туннель
+            // поднятым. Ровно на этом рождался призрак: пользователь удалял
+            // туннель, модель думала, что он опущен, службу никто не звал, и
+            // интерфейс продолжал жить в ядре вместе со своим конфигом. Если у
+            // него тот же ключ пира, что у рабочего туннеля, он раз в 120 с
+            // перехватывает сессию на сервере -- замер на 5000014556 показал
+            // 7,3 % потерь и провалы по 7-15 с. Служба идемпотентна: на
+            // неподнятый интерфейс она отвечает сразу.
+            withContext(Dispatchers.IO) { getBackend().setState(tunnel, Tunnel.State.DOWN, null) }
             try {
                 withContext(Dispatchers.IO) { configStore.delete(tunnel.name) }
             } catch (e: Throwable) {
@@ -204,8 +211,15 @@ class TunnelManager(private val configStore: ConfigStore) : BaseObservable() {
         var throwable: Throwable? = null
         var newName: String? = null
         try {
-            if (originalState == Tunnel.State.UP)
-                withContext(Dispatchers.IO) { getBackend().setState(tunnel, Tunnel.State.DOWN, null) }
+            // Опускаем ВСЕГДА, а не только когда наша модель считает туннель
+            // поднятым. Ровно на этом рождался призрак: пользователь удалял
+            // туннель, модель думала, что он опущен, службу никто не звал, и
+            // интерфейс продолжал жить в ядре вместе со своим конфигом. Если у
+            // него тот же ключ пира, что у рабочего туннеля, он раз в 120 с
+            // перехватывает сессию на сервере -- замер на 5000014556 показал
+            // 7,3 % потерь и провалы по 7-15 с. Служба идемпотентна: на
+            // неподнятый интерфейс она отвечает сразу.
+            withContext(Dispatchers.IO) { getBackend().setState(tunnel, Tunnel.State.DOWN, null) }
             withContext(Dispatchers.IO) { configStore.rename(tunnel.name, name) }
             newName = tunnel.onNameChanged(name)
             if (originalState == Tunnel.State.UP)
