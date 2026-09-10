@@ -1,6 +1,6 @@
 // AmneziaWG (наша сборка) -- UI для ядерного туннеля.
 //
-// Отличия от апстрима (патч: /data/@@VPS/android-module/app-fork/):
+// Отличия от апстрима (патч: /data/@@VPS/awg-android-kernel/app-fork/):
 //   * нативная часть выброшена -- awg/awg-quick приезжают из ROM, go-бэкенда нет;
 //   * AwgQuickBackend не использует RootShell: root на устройстве не нужен,
 //     всё делегируется init-сервису amneziawg_up/down (см. ServiceControl.java).
