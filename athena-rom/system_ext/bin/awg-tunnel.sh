@@ -93,6 +93,8 @@ RX_ALIVE=8192
 # новых попыток ядро само переспрашивает хендшейк около 90 с
 # (REKEY_ATTEMPT_TIME), и шаг больше этого оставил бы туннель совсем молчащим.
 RETRY_MAX=120
+# Сколько ждать после неразрушающего толчка, прежде чем ломать сессию.
+NUDGE_WAIT=20
 # Период опроса, когда пути наружу нет вовсе. Делать в этом состоянии нечего,
 # а возврат сети мы всё равно заметим -- он выглядит как смена пути. Шесть
 # итераций в минуту превращаются в одну.
@@ -219,6 +221,22 @@ iptables_cleanup() {
     done
 }
 
+# Неразрушающий толчок: nudge <iface>.
+#
+# Переключение persistent-keepalive через ноль заставляет модуль немедленно
+# отправить keepalive (netlink.c: send_keepalive при переходе 0 -> ненулевое).
+# Если сессия старше REKEY_AFTER_TIME, WireGuard на этом же пакете сам затевает
+# новый хендшейк. Сессия при этом ЦЕЛА: ключи, счётчики и соединения поверх
+# туннеля не трогаются, в отличие от provoke() с заменой пиров.
+nudge() {
+    for P in $(awg show "$1" peers 2>/dev/null); do
+        K=$(awg show "$1" persistent-keepalive 2>/dev/null | awk -v p="$P" '$1 == p { print $2 }')
+        case "$K" in ''|off|0) K=25 ;; esac
+        awg set "$1" peer "$P" persistent-keepalive 0 2>/dev/null
+        awg set "$1" peer "$P" persistent-keepalive "$K" 2>/dev/null
+    done
+}
+
 provoke() {
     CONF="$DIR/$1.conf"
     STRIP="$DIR/.$1.strip"
@@ -230,14 +248,10 @@ provoke() {
         fi
         rm -f "$STRIP"
     fi
-    # Запасной путь: keepalive через ноль даёт немедленный хендшейк, но старую
-    # сессию не сбрасывает.
-    for P in $(awg show "$1" peers 2>/dev/null); do
-        K=$(awg show "$1" persistent-keepalive 2>/dev/null | awk -v p="$P" '$1 == p { print $2 }')
-        case "$K" in ''|off|0) K=25 ;; esac
-        awg set "$1" peer "$P" persistent-keepalive 0 2>/dev/null
-        awg set "$1" peer "$P" persistent-keepalive "$K" 2>/dev/null
-    done
+    # Запасной путь: тот же толчок, что и nudge -- keepalive через ноль даёт
+    # немедленный хендшейк, но старую сессию не сбрасывает. Лучше, чем ничего,
+    # когда конфига нет или setconf не прошёл.
+    nudge "$1"
 }
 
 # --- слежение за одним интерфейсом: состояние между итерациями ---
@@ -254,14 +268,14 @@ watch_load() {
           RX0=\${RX0_$K:-0}; HS0=\${HS0_$K:-}; LAST_REBIND=\${LAST_REBIND_$K:-0}; \
           LOST=\${LOST_$K:-0}; NOHS_SINCE=\${NOHS_SINCE_$K:-$2}; \
           PREV_RX=\${PREV_RX_$K:--1}; PREV_TX=\${PREV_TX_$K:--1}; \
-          STALL=\${STALL_$K:-0}; GAP=\${GAP_$K:-$RETRY_GAP}"
+          STALL=\${STALL_$K:-0}; GAP=\${GAP_$K:-$RETRY_GAP}; NUDGED=\${NUDGED_$K:-0}"
 }
 
 watch_save() {
     K=$(watch_key "$1")
     eval "DEV_$K=\$DEV; TRY_$K=\$TRY; DEADLINE_$K=\$DEADLINE; RX0_$K=\$RX0; \
           HS0_$K=\$HS0; LAST_REBIND_$K=\$LAST_REBIND; LOST_$K=\$LOST; NOHS_SINCE_$K=\$NOHS_SINCE; \
-          PREV_RX_$K=\$PREV_RX; PREV_TX_$K=\$PREV_TX; STALL_$K=\$STALL; GAP_$K=\$GAP"
+          PREV_RX_$K=\$PREV_RX; PREV_TX_$K=\$PREV_TX; STALL_$K=\$STALL; GAP_$K=\$GAP; NUDGED_$K=\$NUDGED"
 }
 
 # Одна итерация слежения за интерфейсом $1 в момент $2 (секунды).
@@ -345,9 +359,33 @@ watch_iter() {
                 NOHS_SINCE=$T
                 STALE=$(( T - AGE )) ;;
         esac
-        if [ "$STALE" -gt $HS_STALE ] && [ $(( T - LAST_REBIND )) -gt $REBIND_MIN_GAP ]; then
-            log "$IFACE: хендшейка нет $STALE с, пересоздаю сокет"
-            RX0=$RXN; HS0=$AGE; GAP=$RETRY_GAP
+        # Возраст хендшейка сам по себе НЕ повод ломать туннель.
+        #
+        # Замер (5000014556, 08:27-08:33) показал, что у здорового туннеля
+        # хендшейк обновляется каждые 125 с и до порога не дотягивает. Но во сне
+        # аппарата keepalive не уходит, обновлять хендшейк нечем, и на
+        # пробуждении возраст всегда просрочен -- при полностью живой сессии.
+        # Прежний сторож в этот момент сносил её через `setconf` с заменой
+        # пиров: всё, что было в полёте, вставало до нового хендшейка, и
+        # пользователь видел периодические замирания секунд на двадцать. Разбор
+        # журнала за час: семь пересозданий, почти все по этой причине.
+        #
+        # WireGuard лечится сам -- на первом же отправленном пакете по сессии
+        # старше 120 с он затевает новый хендшейк. Вмешиваться нужно, только
+        # если его собственные попытки не проходят, а это видно по приёму: он
+        # стоит ровно. Поэтому требуем ещё и отсутствия приёма.
+        # Отличить живую сессию от мёртвой по счётчикам нельзя: сервер
+        # keepalive не шлёт, приём стоит в обоих случаях (замер 08:27-08:33 --
+        # rx двигался только в момент хендшейка). Поэтому сначала осторожный
+        # толчок, и только если он не помог -- разрушающее пересоздание.
+        if [ "$STALE" -le $HS_STALE ]; then
+            NUDGED=0
+        elif [ "$NUDGED" = 0 ]; then
+            log "$IFACE: хендшейк стар ($STALE с), толкаю keepalive, сессию не трогаю"
+            nudge "$IFACE"; NUDGED=$T
+        elif [ $(( T - NUDGED )) -ge $NUDGE_WAIT ] && [ $(( T - LAST_REBIND )) -gt $REBIND_MIN_GAP ]; then
+            log "$IFACE: толчок не помог за $(( T - NUDGED )) с (rx +$(( RXN - PREV_RX ))), пересоздаю сокет"
+            RX0=$RXN; HS0=$AGE; GAP=$RETRY_GAP; NUDGED=0
             rebind "$IFACE"; LAST_REBIND=$T; TRY=1; DEADLINE=$(( T + GAP )); NOHS_SINCE=$T; REBOUND=1
         fi
     fi
