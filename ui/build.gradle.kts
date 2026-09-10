@@ -21,8 +21,24 @@ android {
     defaultConfig {
         applicationId = pkg
         targetSdk = 36
-        versionCode = providers.gradleProperty("amneziawgVersionCode").get().toInt()
-        versionName = providers.gradleProperty("amneziawgVersionName").get()
+        // athena: к версии апстрима добавляется номер нашей сборки.
+        //
+        // Иначе PackageManager не перечитывает подменённый APK: у наших сборок
+        // совпадают и versionCode, и размер файла, а `touch` разбор не
+        // сбрасывает -- проверено 2026-09-10, система десять минут держала
+        // манифест от вчерашней установки и отвечала "Unable to start service
+        // ... not found" на KernelVpnService, которого в её разборе не было.
+        // Лечилось только очисткой /data/system/package_cache и перезагрузкой.
+        //
+        // Номер берётся из athenaBuild в gradle.properties. Поднимайте его на
+        // каждую сборку, которая уезжает на аппарат.
+        // versionCode двигает athenaBuild, versionName несёт нашу версию сборки
+        // (krabVersion) -- ту же, что у прошивки, чтобы по экрану «о программе»
+        // было видно, какая сборка стоит.
+        val athenaBuild = providers.gradleProperty("athenaBuild").get().toInt()
+        versionCode = providers.gradleProperty("amneziawgVersionCode").get().toInt() * 1000 + athenaBuild
+        versionName = providers.gradleProperty("amneziawgVersionName").get() + "-" +
+                providers.gradleProperty("krabVersion").get()
         buildConfigField("int", "MIN_SDK_VERSION", minSdk.toString())
     }
     compileOptions {

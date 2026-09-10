@@ -12,5 +12,9 @@ set_metadata_recursive("/mnt/system/system/system_ext/app/AmneziaWG", "uid", 0, 
 set_metadata("/mnt/system/system/addon.d/71-amneziawg.sh", "uid", 0, "gid", 0, "mode", 0755, "capabilities", 0x0, "selabel", "u:object_r:system_file:s0");
 show_progress(0.400000, 0);
 unmount("/mnt/system");
+ui_print("Чищу кэш разбора пакетов, иначе новый APK не будет перечитан");
+mount("ext4", "EMMC", "/dev/block/by-name/userdata", "/mnt/data");
+delete_recursive("/mnt/data/system/package_cache");
+unmount("/mnt/data");
 ui_print("Готово. Нужен ROM с модулем amneziawg.ko и доменами sepolicy.");
 set_progress(1.000000);
