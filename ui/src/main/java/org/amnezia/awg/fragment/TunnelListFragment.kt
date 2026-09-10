@@ -68,6 +68,32 @@ class TunnelListFragment : BaseFragment() {
      */
     @Volatile
     private var buttonBusy = false
+    /** Какого состояния ждём, пока кнопка занята; по достижении занятость снимается. */
+    @Volatile
+    private var awaitedState: Tunnel.State? = null
+    /** Крайний срок занятости: страховка на случай, если операция не доложит о себе. */
+    @Volatile
+    private var buttonBusyUntil = 0L
+
+    /**
+     * Переключатель в строке списка идёт через общий обработчик базового
+     * фрагмента и кнопку не трогает вовсе: она узнавала об операции только
+     * когда та уже закончилась, и промежуточное «подключаюсь» не показывалось.
+     * Перехватываем: переставляем кнопку на этот туннель и сразу рисуем ход.
+     */
+    override fun setTunnelState(view: android.view.View, checked: Boolean) {
+        val item = (androidx.databinding.DataBindingUtil.findBinding<androidx.databinding.ViewDataBinding>(view)
+                as? TunnelListItemBinding)?.item
+        if (item != null && binding != null) {
+            bindButtonTo(item)
+            awaitedState = if (checked) Tunnel.State.UP else Tunnel.State.DOWN
+            buttonBusyUntil = System.currentTimeMillis() + 40_000
+            buttonBusy = true
+            binding?.connectButton?.state =
+                if (checked) ConnectButton.State.CONNECTING else ConnectButton.State.DISCONNECTING
+        }
+        super.setTunnelState(view, checked)
+    }
     private val tunnelFileImportResultLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { data ->
         if (data == null) return@registerForActivityResult
         val activity = activity ?: return@registerForActivityResult
@@ -191,7 +217,36 @@ class TunnelListFragment : BaseFragment() {
             // держит модель в согласии с бэкендом.
             viewLifecycleOwner.lifecycleScope.launch {
                 while (isActive) {
+                    // Кнопка следует за тем туннелем, который реально поднят.
+                    //
+                    // Привязка делалась один раз при построении экрана, и
+                    // переключение на другой сервер через список её не меняло:
+                    // человек включал второй туннель, а кнопка продолжала
+                    // показывать состояние первого и выключала бы именно его.
+                    // Своя операция при этом главнее -- пока идёт нажатие,
+                    // привязку не трогаем.
+                    if (!buttonBusy) {
+                        val running = runCatching {
+                            Application.getTunnelManager().getTunnels()
+                                .firstOrNull { it.state == Tunnel.State.UP }
+                        }.getOrNull()
+                        if (running != null && running.name != buttonTunnel?.name)
+                            bindButtonTo(running)
+                    }
                     val tunnel = buttonTunnel
+                    if (tunnel != null) {
+                        val state = runCatching { Application.getTunnelManager().getTunnelState(tunnel) }
+                            .getOrDefault(tunnel.state)
+                        // Занятость снимаем, когда операция дошла до нужного
+                        // состояния, либо по сроку -- чтобы кнопка не залипла,
+                        // если о завершении никто не доложил.
+                        val awaited = awaitedState
+                        if (buttonBusy && awaited != null &&
+                            (state == awaited || System.currentTimeMillis() > buttonBusyUntil)) {
+                            awaitedState = null
+                            buttonBusy = false
+                        }
+                    }
                     if (tunnel != null && !buttonBusy) {
                         val state = runCatching { Application.getTunnelManager().getTunnelState(tunnel) }
                             .getOrDefault(tunnel.state)
@@ -277,6 +332,7 @@ class TunnelListFragment : BaseFragment() {
                 val up = current != Tunnel.State.UP
                 b.connectButton.state =
                     if (up) ConnectButton.State.CONNECTING else ConnectButton.State.DISCONNECTING
+                awaitedState = null
                 try {
                     tunnel.setStateAsync(Tunnel.State.of(up))
                 } catch (e: Throwable) {

@@ -58,7 +58,9 @@ abstract class BaseFragment : Fragment(), OnSelectedTunnelChangedListener {
         super.onDetach()
     }
 
-    fun setTunnelState(view: View, checked: Boolean) {
+    // open: список переопределяет его, чтобы кнопка показывала ход операции,
+    // начатой переключателем в строке (см. TunnelListFragment).
+    open fun setTunnelState(view: View, checked: Boolean) {
         val tunnel = when (val binding = DataBindingUtil.findBinding<ViewDataBinding>(view)) {
             is TunnelDetailFragmentBinding -> binding.tunnel
             is TunnelListItemBinding -> binding.item

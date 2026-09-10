@@ -15,6 +15,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
+import android.os.Looper
 import android.util.AttributeSet
 import android.util.TypedValue
 import androidx.core.content.ContextCompat
@@ -101,13 +102,24 @@ class ConnectButton @JvmOverloads constructor(
         set(value) {
             if (field == value) return
             field = value
-            if (value == State.CONNECTING || value == State.DISCONNECTING) {
-                if (!spinner.isStarted) spinner.start()
-            } else {
-                spinner.cancel()
-            }
-            invalidate()
+            // Состояние приходит и с фоновых потоков: ObservableTunnel шлёт
+            // уведомление из того потока, где отработала операция с туннелем.
+            // ValueAnimator этого не прощает -- "Animators may only be run on
+            // Looper threads", и исключение всплывало наверх как «ошибка при
+            // подъёме туннеля», хотя туннель переключался нормально
+            // (замер 10:32:22 на 5000014556). invalidate() из чужого потока
+            // тоже нельзя.
+            if (Looper.myLooper() == Looper.getMainLooper()) applyState() else post { applyState() }
         }
+
+    private fun applyState() {
+        if (state == State.CONNECTING || state == State.DISCONNECTING) {
+            if (!spinner.isStarted) spinner.start()
+        } else {
+            spinner.cancel()
+        }
+        invalidate()
+    }
 
     init {
         isClickable = true
