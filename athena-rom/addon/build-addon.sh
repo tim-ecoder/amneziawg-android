@@ -1,5 +1,5 @@
 #!/bin/bash
-# Сборка awg-addon.zip -- userspace-части ядерного AmneziaWG для athena.
+# Сборка awg-kernel-addon.zip -- userspace-части ядерного AmneziaWG для athena.
 #
 # В zip входят тулзы awg/awg-quick, служба awg-tunnel.sh, amneziawg.rc, APK и
 # addon.d-скрипт. Модуль ядра и sepolicy сюда НЕ входят (привязаны к ядру и
@@ -23,7 +23,7 @@ KEYS=/data/@SIGNING-KEYS/signing-keys
 HOST=/data/los23out2/host/linux-x86
 SIGNAPK="java -Djava.library.path=$HOST/lib64 -jar $HOST/framework/signapk.jar"
 APK="${1:-$HERE/../app-fork/AmneziaWG-athena-platform.apk}"
-PREV="$HERE/awg-addon.zip"
+PREV="$HERE/awg-kernel-addon.zip"
 WORK="$(mktemp -d /tmp/claude-1000/-data-LOS232/addon.XXXXXX 2>/dev/null || mktemp -d)"
 
 [ -f "$APK" ] || { echo "нет APK: $APK" >&2; exit 1; }
@@ -43,6 +43,11 @@ for t in awg awg-quick; do
     [ -f "$HERE/../prebuilt/$t" ] && install -m 0755 "$HERE/../prebuilt/$t" "system/bin/$t"
 done
 
+# Уборка кэша разбора пакетов в updater-script -- по возможности: раздел данных
+# зашифрован пофайлово, и recovery может не увидеть там имён. Настоящая гарантия
+# того, что новый APK будет перечитан, -- подвижный versionCode (athenaBuild в
+# gradle.properties форка), см. разбор в README, часть про package_cache.
+
 # Свои метаданные вместо взятых из прежнего zip.
 python3 "$HERE/make-metadata.py" "$WORK"
 
@@ -50,9 +55,9 @@ python3 "$HERE/make-metadata.py" "$WORK"
 rm -f unsigned.zip
 zip -q -X unsigned.zip META-INF/com/android/metadata META-INF/com/android/metadata.pb
 zip -q -X -r unsigned.zip META-INF/com/google system
-$SIGNAPK -w "$KEYS/releasekey.x509.pem" "$KEYS/releasekey.pk8" unsigned.zip awg-addon.zip
+$SIGNAPK -w "$KEYS/releasekey.x509.pem" "$KEYS/releasekey.pk8" unsigned.zip awg-kernel-addon.zip
 
-cp awg-addon.zip "$PREV"
+cp awg-kernel-addon.zip "$PREV"
 rm -rf "$WORK"
 echo "готово: $PREV"
 unzip -l "$PREV" | sed -n '4,20p'
