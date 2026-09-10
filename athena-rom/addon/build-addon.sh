@@ -25,7 +25,14 @@ SIGNAPK="java -Djava.library.path=$HOST/lib64 -jar $HOST/framework/signapk.jar"
 # По умолчанию берём последнюю подписанную сборку с именем вида
 # amneziawg-kernel-krab-vX.Ya.apk; путь можно передать первым аргументом.
 APK="${1:-$(ls -t "$HERE"/../app-fork/amneziawg-kernel-*.apk 2>/dev/null | head -1)}"
-PREV="$HERE/awg-kernel-addon.zip"
+# Версия в имени zip -- та же, что у APK и у приложения: берём её из форка,
+# чтобы имя аддона нельзя было разойтись с тем, что внутри.
+KRAB="$(sed -n 's/^krabVersion=//p' "$ROM/../gradle.properties" 2>/dev/null)"
+KRAB="${KRAB:-krab-v0.0}"
+OUT="$HERE/awg-kernel-addon-$KRAB.zip"
+# Каркас (метаданные, update-binary, тулзы) берём из последнего собранного zip.
+PREV="$(ls -t "$HERE"/awg-kernel-addon-*.zip 2>/dev/null | grep -v cleaner | head -1)"
+[ -n "$PREV" ] || PREV="$HERE/awg-kernel-addon.zip"
 WORK="$(mktemp -d /tmp/claude-1000/-data-LOS232/addon.XXXXXX 2>/dev/null || mktemp -d)"
 
 [ -f "$APK" ] || { echo "нет APK: $APK" >&2; exit 1; }
@@ -59,8 +66,8 @@ zip -q -X unsigned.zip META-INF/com/android/metadata META-INF/com/android/metada
 zip -q -X -r unsigned.zip META-INF/com/google system
 $SIGNAPK -w "$KEYS/releasekey.x509.pem" "$KEYS/releasekey.pk8" unsigned.zip awg-kernel-addon.zip
 
-cp awg-kernel-addon.zip "$PREV"
+cp awg-kernel-addon.zip "$OUT"
 rm -rf "$WORK"
-echo "готово: $PREV"
-unzip -l "$PREV" | sed -n '4,20p'
-md5sum "$PREV"
+echo "готово: $OUT"
+unzip -l "$OUT" | sed -n '4,20p'
+md5sum "$OUT"

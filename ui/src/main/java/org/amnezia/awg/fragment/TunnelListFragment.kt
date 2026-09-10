@@ -186,9 +186,13 @@ class TunnelListFragment : BaseFragment() {
     private fun wireConnectButton() {
         val b = binding ?: return
         lifecycleScope.launch {
+            // Слушатели ставим до всякого туннеля. Раньше вся проводка
+            // пропускалась, если на момент построения экрана список был пуст, и
+            // после первого импорта кнопка оставалась мёртвой: селектор без
+            // имени, нажатия без ответа -- до перезапуска приложения.
             val tunnels = Application.getTunnelManager().getTunnels()
-            if (tunnels.isEmpty()) return@launch
-            bindButtonTo(tunnels.firstOrNull { it.name == buttonTunnel?.name } ?: tunnels[0])
+            if (tunnels.isNotEmpty())
+                bindButtonTo(tunnels.firstOrNull { it.name == buttonTunnel?.name } ?: tunnels[0])
 
             b.tunnelSelector.setOnClickListener {
                 lifecycleScope.launch {
@@ -226,12 +230,15 @@ class TunnelListFragment : BaseFragment() {
                     // Своя операция при этом главнее -- пока идёт нажатие,
                     // привязку не трогаем.
                     if (!buttonBusy) {
-                        val running = runCatching {
-                            Application.getTunnelManager().getTunnels()
-                                .firstOrNull { it.state == Tunnel.State.UP }
-                        }.getOrNull()
+                        val all = runCatching { Application.getTunnelManager().getTunnels() }.getOrNull()
+                        val running = all?.firstOrNull { it.state == Tunnel.State.UP }
                         if (running != null && running.name != buttonTunnel?.name)
                             bindButtonTo(running)
+                        // Первый туннель мог появиться уже после построения
+                        // экрана -- импортом или созданием. Тогда привязываемся
+                        // здесь, а не ждём следующего запуска приложения.
+                        else if (buttonTunnel == null && !all.isNullOrEmpty())
+                            bindButtonTo(all[0])
                     }
                     val tunnel = buttonTunnel
                     if (tunnel != null) {
@@ -333,21 +340,45 @@ class TunnelListFragment : BaseFragment() {
                 b.connectButton.state =
                     if (up) ConnectButton.State.CONNECTING else ConnectButton.State.DISCONNECTING
                 awaitedState = null
-                try {
-                    tunnel.setStateAsync(Tunnel.State.of(up))
-                } catch (e: Throwable) {
-                    val ctx = activity ?: Application.get()
-                    val message = ctx.getString(if (up) R.string.error_up else R.string.error_down, ErrorMessages[e])
-                    // Пишем и в журнал: на экране сообщение живёт секунды, и
-                    // разобрать задним числом, что именно отказало, было нечем.
-                    Log.e(TAG, message, e)
-                    showSnackbar(message)
-                } finally {
-                    buttonBusy = false
+                // Первое включение требует согласия на VPN: датапас ядерный, но
+                // сеть приложениям даёт оболочка VpnService. Кнопка звала
+                // setState напрямую, минуя запрос, и получала
+                // "VPN service not authorized by user" -- на экране при этом не
+                // было ничего, только строка в журнале.
+                if (up) {
+                    val granted = ensureVpnPermission {
+                        buttonBusy = true
+                        b.connectButton.state = ConnectButton.State.CONNECTING
+                        activity?.lifecycleScope?.launch { toggleFromButton(tunnel, true) { refresh() } }
+                    }
+                    if (!granted) {
+                        // Диалог показан; кнопку отпускаем, чтобы она не висела
+                        // в "подключении", пока человек думает.
+                        buttonBusy = false
+                        refresh()
+                        return@launch
+                    }
                 }
-                refresh()
+                toggleFromButton(tunnel, up) { refresh() }
             }
         }
+    }
+
+    /** Само переключение туннеля кнопкой, с разбором ошибки и снятием занятости. */
+    private suspend fun toggleFromButton(tunnel: ObservableTunnel, up: Boolean, refresh: () -> Unit) {
+        try {
+            tunnel.setStateAsync(Tunnel.State.of(up))
+        } catch (e: Throwable) {
+            val ctx = activity ?: Application.get()
+            val message = ctx.getString(if (up) R.string.error_up else R.string.error_down, ErrorMessages[e])
+            // Пишем и в журнал: на экране сообщение живёт секунды, и разобрать
+            // задним числом, что именно отказало, было нечем.
+            Log.e(TAG, message, e)
+            showSnackbar(message)
+        } finally {
+            buttonBusy = false
+        }
+        refresh()
     }
 
     override fun onDestroyView() {

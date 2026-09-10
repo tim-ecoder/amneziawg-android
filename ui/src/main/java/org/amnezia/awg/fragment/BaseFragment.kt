@@ -18,7 +18,6 @@ import org.amnezia.awg.Application
 import org.amnezia.awg.R
 import org.amnezia.awg.activity.BaseActivity
 import org.amnezia.awg.activity.BaseActivity.OnSelectedTunnelChangedListener
-import org.amnezia.awg.backend.GoBackend
 import org.amnezia.awg.backend.Tunnel
 import org.amnezia.awg.databinding.TunnelDetailFragmentBinding
 import org.amnezia.awg.databinding.TunnelListItemBinding
@@ -33,13 +32,45 @@ import kotlinx.coroutines.launch
 abstract class BaseFragment : Fragment(), OnSelectedTunnelChangedListener {
     private var pendingTunnel: ObservableTunnel? = null
     private var pendingTunnelUp: Boolean? = null
+    private var pendingAction: (() -> Unit)? = null
     private val permissionActivityResultLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        val action = pendingAction
+        pendingAction = null
+        if (action != null) {
+            action()
+            return@registerForActivityResult
+        }
         val tunnel = pendingTunnel
         val checked = pendingTunnelUp
         if (tunnel != null && checked != null)
             setTunnelStateWithPermissionsResult(tunnel, checked)
         pendingTunnel = null
         pendingTunnelUp = null
+    }
+
+    /**
+     * Просит у системы согласие на VPN, если его ещё нет.
+     *
+     * Возвращает true, если согласие уже есть и действие можно делать сразу;
+     * false -- если показан системный диалог, и действие выполнится само, когда
+     * человек ответит.
+     *
+     * Нужно и в ядерном режиме: датапас у нас в ядре, но поверх него поднимается
+     * оболочка VpnService (KernelVpnService), а её без согласия система не
+     * запускает -- служба отвечает "VPN service not authorized by user".
+     */
+    protected fun ensureVpnPermission(action: () -> Unit): Boolean {
+        val activity = activity ?: return true
+        val intent = try {
+            android.net.VpnService.prepare(activity)
+        } catch (e: Throwable) {
+            Log.e(TAG, activity.getString(R.string.error_prepare, ErrorMessages[e]), e)
+            null
+        }
+        if (intent == null) return true
+        pendingAction = action
+        permissionActivityResultLauncher.launch(intent)
+        return false
     }
 
     protected var selectedTunnel: ObservableTunnel?
@@ -68,9 +99,12 @@ abstract class BaseFragment : Fragment(), OnSelectedTunnelChangedListener {
         } ?: return
         val activity = activity ?: return
         activity.lifecycleScope.launch {
-            if (Application.getBackend() is GoBackend) {
+            // Апстрим спрашивает согласие только у go-бэкенда. Нам оно нужно и в
+            // ядерном режиме: туннель ядерный, но VPN-сеть приложениям даёт
+            // оболочка VpnService, и без согласия она не поднимается.
+            if (checked) {
                 try {
-                    val intent = GoBackend.VpnService.prepare(activity)
+                    val intent = android.net.VpnService.prepare(activity)
                     if (intent != null) {
                         pendingTunnel = tunnel
                         pendingTunnelUp = checked

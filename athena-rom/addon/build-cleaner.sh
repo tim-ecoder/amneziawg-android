@@ -20,8 +20,12 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 KEYS=/data/@SIGNING-KEYS/signing-keys
 HOST=/data/los23out2/host/linux-x86
 SIGNAPK="java -Djava.library.path=$HOST/lib64 -jar $HOST/framework/signapk.jar"
-PREV="$HERE/awg-kernel-addon.zip"
-OUT="$HERE/awg-kernel-addon-cleaner.zip"
+# update-binary и версия -- из основного аддона той же сборки.
+PREV="$(ls -t "$HERE"/awg-kernel-addon-*.zip 2>/dev/null | grep -v cleaner | head -1)"
+[ -n "$PREV" ] || PREV="$HERE/awg-kernel-addon.zip"
+KRAB="$(sed -n 's/^krabVersion=//p' /data/awg-app-build/amneziawg-android/gradle.properties 2>/dev/null)"
+KRAB="${KRAB:-krab-v0.0}"
+OUT="$HERE/awg-kernel-addon-cleaner-$KRAB.zip"
 WORK="$(mktemp -d /tmp/claude-1000/-data-LOS232/cleaner.XXXXXX 2>/dev/null || mktemp -d)"
 
 [ -f "$PREV" ] || { echo "нет $PREV -- update-binary берётся оттуда" >&2; exit 1; }
