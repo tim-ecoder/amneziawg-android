@@ -48,8 +48,12 @@ service amneziawg_down /system_ext/bin/awg-tunnel.sh down ${sys.amneziawg.iface}
 service amneziawg_status /system_ext/bin/awg-tunnel.sh status
     class late_start
     user root
-    group root net_admin inet
-    capabilities NET_ADMIN DAC_OVERRIDE DAC_READ_SEARCH
+    # net_raw нужен так же, как ветке up: при пересоздании сокета служба
+    # переставляет правило iptables вслед за портом, а iptables открывает
+    # сырой сокет и без CAP_NET_RAW молча отказывает. Домен политикой это
+    # уже разрешает (amneziawg.te: net_admin net_raw), не хватало объявления.
+    group root net_admin net_raw inet
+    capabilities NET_ADMIN NET_RAW DAC_OVERRIDE DAC_READ_SEARCH
     disabled
     seclabel u:r:amneziawg:s0
 

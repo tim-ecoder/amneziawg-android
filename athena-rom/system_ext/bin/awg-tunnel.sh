@@ -162,7 +162,13 @@ rebind() {
     NEW=$(( 41000 + $(date +%s) % 20000 ))
     [ "$NEW" = "$CUR" ] && NEW=$(( NEW + 1 ))
     awg set "$1" listen-port "$NEW" 2>/dev/null || return 1
-    log "$1: сокет пересоздан, порт $CUR -> $NEW"
+    # Правило iptables ставилось при подъёме и оставалось на прежнем порту:
+    # проверено на аппарате -- правило держало 47806, когда сокет жил уже на
+    # 57041. С первой же смены сети входящие пакеты туннеля переставали
+    # коротиться нашим ACCEPT и шли через bw_INPUT и fw_INPUT, то есть через
+    # поуидный учёт и цепочки дозы. Переставляем правило вслед за портом.
+    iptables_cleanup "$1"; iptables_add "$1"
+    log "$1: сокет пересоздан, порт $CUR -> $NEW, причина: ${2:-не указана}"
     provoke "$1"
 }
 
@@ -208,7 +214,10 @@ iptables_add() {
     iptables -I OUTPUT 1 -m mark --mark 0x20000 -j ACCEPT -m comment --comment "amneziawg rule $1" 2>/dev/null
     ip6tables -I OUTPUT 1 -m mark --mark 0x20000 -j ACCEPT -m comment --comment "amneziawg rule $1" 2>/dev/null
     P=$(awg show "$1" listen-port 2>/dev/null)
-    [ -n "$P" ] && iptables -I INPUT 1 -p udp --dport "$P" -j ACCEPT -m comment --comment "amneziawg rule $1" 2>/dev/null
+    # Для IPv6-эндпоинта правило INPUT не заводилось вовсе -- при v4-сервере
+    # это незаметно, но ветка существует и должна быть симметричной.
+    [ -n "$P" ] && iptables  -I INPUT 1 -p udp --dport "$P" -j ACCEPT -m comment --comment "amneziawg rule $1" 2>/dev/null
+    [ -n "$P" ] && ip6tables -I INPUT 1 -p udp --dport "$P" -j ACCEPT -m comment --comment "amneziawg rule $1" 2>/dev/null
 }
 iptables_cleanup() {
     # Удаляем той же спецификацией, что добавляли: разбирать вывод -S нельзя,
@@ -267,7 +276,8 @@ watch_load() {
     eval "DEV=\${DEV_$K:-}; TRY=\${TRY_$K:-0}; DEADLINE=\${DEADLINE_$K:-0}; \
           RX0=\${RX0_$K:-0}; HS0=\${HS0_$K:-}; LAST_REBIND=\${LAST_REBIND_$K:-0}; \
           LOST=\${LOST_$K:-0}; NOHS_SINCE=\${NOHS_SINCE_$K:-$2}; \
-          PREV_RX=\${PREV_RX_$K:--1}; PREV_TX=\${PREV_TX_$K:--1}; \
+          PREV_RX=\${PREV_RX_$K:--1}; PREV_TX=\${PREV_TX_$K:--1}; PREV_T=\${PREV_T_$K:-0}; \
+          REB_N=\${REB_N_$K:-0}; REB_SINCE=\${REB_SINCE_$K:-$2}; CAPPED=\${CAPPED_$K:-0}; \
           STALL=\${STALL_$K:-0}; GAP=\${GAP_$K:-$RETRY_GAP}; NUDGED=\${NUDGED_$K:-0}"
 }
 
@@ -275,7 +285,81 @@ watch_save() {
     K=$(watch_key "$1")
     eval "DEV_$K=\$DEV; TRY_$K=\$TRY; DEADLINE_$K=\$DEADLINE; RX0_$K=\$RX0; \
           HS0_$K=\$HS0; LAST_REBIND_$K=\$LAST_REBIND; LOST_$K=\$LOST; NOHS_SINCE_$K=\$NOHS_SINCE; \
-          PREV_RX_$K=\$PREV_RX; PREV_TX_$K=\$PREV_TX; STALL_$K=\$STALL; GAP_$K=\$GAP; NUDGED_$K=\$NUDGED"
+          PREV_RX_$K=\$PREV_RX; PREV_TX_$K=\$PREV_TX; PREV_T_$K=\$PREV_T; \
+          REB_N_$K=\$REB_N; REB_SINCE_$K=\$REB_SINCE; CAPPED_$K=\$CAPPED; \
+          STALL_$K=\$STALL; GAP_$K=\$GAP; NUDGED_$K=\$NUDGED"
+}
+
+# Потолок пересозданий сокета. Какая бы ветка ни ошиблась, дёргать сессию
+# чаще этого бессмысленно: каждое пересоздание -- новый хендшейк с мусорным
+# набором Jc и I1..I5, то есть лишний радиообмен. Упор в потолок сам по себе
+# улика: значит сторож буйствует, и это видно в журнале.
+REBIND_MAX_PER_HOUR=6
+
+# Пересоздание с учётом потолка: try_rebind <iface> <момент> <причина>.
+try_rebind() {
+    if [ $(( $2 - REB_SINCE )) -ge 3600 ]; then REB_SINCE=$2; REB_N=0; CAPPED=0; fi
+    if [ "$REB_N" -ge $REBIND_MAX_PER_HOUR ]; then
+        [ "$CAPPED" = 0 ] && log "$1: $REB_N пересозданий за час -- упёрся в потолок, жду (причина была: $3)"
+        CAPPED=1
+        WANT=$IDLE_PERIOD
+        return 1
+    fi
+    REB_N=$(( REB_N + 1 ))
+    rebind "$1" "$3"
+}
+
+# Годно ли прошедшее окно для признака тишины, и сколько байт в нём считать
+# порогом: stall_window <момент>. Ответ кладётся в STALL_NEED.
+#
+# Прежний порог был числом -- 512 байт, выведенных из замера для окна в 10
+# секунд (keepalive даёт 192 байта раз в 25 с, максимум 384 за окно). Но окно
+# не фиксировано: шаг опроса растёт до IDLE_PERIOD, при ожидании
+# восстановления становится GAP/2, а в suspend растягивается по настенным
+# часам как угодно. На длинном окне 512 байт набираются сами собой, и фраза
+# "два окна подряд, то есть 20 секунд" перестаёт быть верной. Поэтому порог
+# берём скоростью, а слишком длинные окна пропускаем: сравнивать в них нечего.
+STALL_RATE=51          # байт в секунду -- те же 512 за 10 с
+STALL_MAX_WINDOW=30    # окна длиннее считаем негодными
+stall_window() {
+    [ "$PREV_T" -gt 0 ] || return 1
+    W=$(( $1 - PREV_T ))
+    [ "$W" -gt 0 ] || return 1
+    [ "$W" -le $STALL_MAX_WINDOW ] || return 1
+    STALL_NEED=$(( STALL_RATE * W ))
+    return 0
+}
+
+# Признак "связь вернулась": recovered <iface> <текущий rx>.
+#
+# Прежняя проверка принимала ЛЮБОЕ изменение метки хендшейка, включая переход
+# "была метка -> ноль". А ноль -- это ровно то, что оставляет после себя
+# setconf со сбросом пиров внутри самого rebind: новый пир рождается без
+# хендшейка. На мёртвом пути сторож объявлял успех через один опрос, обнулял
+# счётчик попыток и переставал лечить -- восстановление затягивалось до
+# сторожа по возрасту хендшейка. Требуем настоящий хендшейк, который прошёл
+# ПОСЛЕ пересоздания.
+#
+# Прирост rx считаем только внутри одной эпохи счётчиков: setconf обнуляет и
+# их, поэтому отрицательная разность -- это смена эпохи, а не отсутствие
+# приёма, и базу надо просто перезаложить.
+recovered() {
+    HSN=$(hs_ts "$1")
+    # Ненулевой и не тот, что был до пересоздания -- значит новый: setconf
+    # обнуляет метку, поэтому всё ненулевое после него заведомо свежее.
+    #
+    # Сравнивать с моментом пересоздания нельзя: хендшейк проходит в ту же
+    # секунду, что и решение о нём (замер на аппарате: решение 19:48:12.277,
+    # хендшейк 19:48:12.8), строгое "новее" не выполнялось, сторож шёл на
+    # вторую попытку и стирал только что полученный хендшейк. Роуминг из-за
+    # этого занимал три пересоздания и две с половиной минуты вместо одного
+    # и одиннадцати секунд.
+    case "$HSN" in
+        ''|0) ;;
+        *) [ "$HSN" != "$HS0" ] && return 0 ;;
+    esac
+    if [ "$2" -lt "$RX0" ]; then RX0=$2; return 1; fi
+    [ $(( $2 - RX0 )) -gt $RX_ALIVE ]
 }
 
 # Одна итерация слежения за интерфейсом $1 в момент $2 (секунды).
@@ -296,15 +380,24 @@ watch_iter() {
         # Опрашиваем реже: пакету всё равно некуда идти, а возврат сети виден
         # как смена пути и заметится не позже чем через IDLE_PERIOD.
         [ "$DEADLINE" = 0 ] && WANT=$IDLE_PERIOD
+        # И на этом заканчиваем итерацию.
+        #
+        # Раньше выполнение шло дальше по цепочке elif, и ветка старого
+        # хендшейка толкала keepalive, а через NUDGE_WAIT пересоздавала сокет --
+        # при том что маршрута наружу по-прежнему нет и пакету некуда идти.
+        # В журнале аппарата это видно подряд: "пути наружу нет" и следом
+        # "хендшейк стар, толкаю keepalive".
+        PREV_RX=$RXN; PREV_TX=$TXN; PREV_T=$T
+        return 0
     fi
 
     if [ -n "$NOW" ] && { { [ -n "$DEV" ] && [ "$NOW" != "$DEV" ]; } || [ "$LOST" = 1 ]; }; then
         log "$IFACE: сеть сменилась, ${DEV:-нет} -> $NOW, пересоздаю сокет"
         LOST=0
         RX0=$RXN; HS0=$(hs_ts "$IFACE"); STALL=0; GAP=$RETRY_GAP
-        rebind "$IFACE"; LAST_REBIND=$T; TRY=1; DEADLINE=$(( T + GAP )); REBOUND=1
-    elif [ "$DEADLINE" != 0 ] && { [ "$(hs_ts "$IFACE")" != "$HS0" ] \
-         || [ $(( RXN - RX0 )) -gt $RX_ALIVE ]; }; then
+        LAST_REBIND=$T
+        if try_rebind "$IFACE" "$T" "сменился путь"; then TRY=1; DEADLINE=$(( T + GAP )); REBOUND=1; fi
+    elif [ "$DEADLINE" != 0 ] && recovered "$IFACE" "$RXN"; then
         # Выздоровление -- ЛИБО новый хендшейк, ЛИБО заметный прирост rx.
         #
         # Одного прироста rx мало, и это стоило целого дня разбора: на
@@ -330,17 +423,20 @@ watch_iter() {
         # всерьёз -- переходим на редкие, чтобы не разряжать батарею впустую.
         GAP=$(( GAP * 2 )); [ "$GAP" -gt $RETRY_MAX ] && GAP=$RETRY_MAX
         log "$IFACE: связи нет, пересоздаю сокет ещё раз (попытка $TRY, следующая через $GAP с)"
-        rebind "$IFACE"; LAST_REBIND=$T; DEADLINE=$(( T + GAP )); REBOUND=1
+        LAST_REBIND=$T
+        if try_rebind "$IFACE" "$T" "попытка $TRY"; then DEADLINE=$(( T + GAP )); REBOUND=1; fi
     elif [ "$DEADLINE" = 0 ] && [ -n "$NOW" ] && [ "$PREV_TX" -ge 0 ] \
-         && [ $(( TXN - PREV_TX )) -ge $RX_STALL_TX ] && [ $(( RXN - PREV_RX )) -le 0 ]; then
+         && stall_window "$T" && [ $(( TXN - PREV_TX )) -ge "$STALL_NEED" ] \
+         && [ $(( RXN - PREV_RX )) -le 0 ] && [ $(( RXN - PREV_RX )) -ge 0 ]; then
         # Отправляем, а в ответ ничего. Считаем подряд идущие такие окна: одного
         # мало, ответ мог задержаться; два подряд -- это уже 20 с односторонней
         # связи, и туннель мёртв.
         STALL=$(( STALL + 1 ))
         if [ "$STALL" -ge $RX_STALL_STRIKES ]; then
-            log "$IFACE: отправлено $(( TXN - PREV_TX )) Б, принято 0, окон подряд $STALL -- пересоздаю сокет"
+            log "$IFACE: отправлено $(( TXN - PREV_TX )) Б за $(( T - PREV_T )) с, принято 0, окон подряд $STALL"
             RX0=$RXN; HS0=$(hs_ts "$IFACE"); STALL=0; GAP=$RETRY_GAP
-            rebind "$IFACE"; LAST_REBIND=$T; TRY=1; DEADLINE=$(( T + GAP )); REBOUND=1
+            LAST_REBIND=$T
+            if try_rebind "$IFACE" "$T" "приём встал"; then TRY=1; DEADLINE=$(( T + GAP )); REBOUND=1; fi
         fi
     elif [ "$DEADLINE" = 0 ]; then
         STALL=0
@@ -386,7 +482,8 @@ watch_iter() {
         elif [ $(( T - NUDGED )) -ge $NUDGE_WAIT ] && [ $(( T - LAST_REBIND )) -gt $REBIND_MIN_GAP ]; then
             log "$IFACE: толчок не помог за $(( T - NUDGED )) с (rx +$(( RXN - PREV_RX ))), пересоздаю сокет"
             RX0=$RXN; HS0=$AGE; GAP=$RETRY_GAP; NUDGED=0
-            rebind "$IFACE"; LAST_REBIND=$T; TRY=1; DEADLINE=$(( T + GAP )); NOHS_SINCE=$T; REBOUND=1
+            LAST_REBIND=$T
+            if try_rebind "$IFACE" "$T" "толчок не помог"; then TRY=1; DEADLINE=$(( T + GAP )); NOHS_SINCE=$T; REBOUND=1; fi
         fi
     fi
 
@@ -403,7 +500,7 @@ watch_iter() {
         [ "$WANT" -gt $IDLE_PERIOD ] && WANT=$IDLE_PERIOD
     fi
 
-    PREV_RX=$RXN; PREV_TX=$TXN
+    PREV_RX=$RXN; PREV_TX=$TXN; PREV_T=$T
     [ -n "$NOW" ] && DEV="$NOW"
     return 0
 }
@@ -508,7 +605,17 @@ up)
         log "модуль amneziawg не загружен"; reply "$IFACE" 3; exit 1
     fi
     if ip link show "$IFACE" >/dev/null 2>&1; then
-        log "$IFACE уже поднят"; write_status; reply "$IFACE" 0; exit 0
+        # Привязку повторяем, а не пропускаем.
+        #
+        # Приложение могло поднять VpnService заново при живом интерфейсе: тогда
+        # у оболочки новая таблица, её маршруты ведут в tun, который никто не
+        # читает, и трафик приложений пропадает, тогда как adb и всё от root
+        # продолжают ходить по нашему правилу 17900 -- отладка при этом выглядит
+        # здоровой. Операция идемпотентна: ip route replace и снос правила перед
+        # добавлением.
+        log "$IFACE уже поднят, обновляю привязку VPN-сети"
+        attach_vpn "$IFACE" >/dev/null 2>&1 || log "$IFACE: привязать VPN-сеть не удалось"
+        write_status; reply "$IFACE" 0; exit 0
     fi
     log "поднимаю $IFACE (ядро $(cat /sys/module/amneziawg/version))"
     # Без awg-quick: он заводил в netd собственную VPN-сеть (network create,

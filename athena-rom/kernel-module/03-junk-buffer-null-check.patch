@@ -1,0 +1,22 @@
+diff --git a/src/send.c b/src/send.c
+index b3f80b0..5c1d566 100644
+--- a/src/send.c
++++ b/src/send.c
+@@ -66,6 +66,17 @@ static void wg_packet_send_handshake_initiation(struct wg_peer *peer)
+ 
+ 		junk_packet_count = wg->jc;
+ 		buffer = kzalloc(wg->jmax, GFP_KERNEL);
++		/* athena: без этой проверки отказ выделения уводил get_random_bytes
++		 * писать по NULL, то есть в панику ядра. Путь живой при любом
++		 * обфускационном профиле (у нас Jc=4, Jmax=1100). Хендшейк при
++		 * нехватке памяти уходит без мусорных пакетов -- это хуже для
++		 * маскировки, но лучше, чем падение.
++		 */
++		if (!buffer) {
++			net_dbg_ratelimited("%s: no memory for junk packets\n",
++					    peer->device->dev->name);
++			junk_packet_count = 0;
++		}
+ 
+ 		while (junk_packet_count-- > 0) {
+ 			junk_packet_size = (u16) get_random_u32_inclusive(wg->jmin, wg->jmax);
